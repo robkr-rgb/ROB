@@ -1,0 +1,1871 @@
+{
+  "pack": "scope-datamodel-ops-v1",
+  "description": "Build wave 4: the quality-control domains the earlier waves did not reach. Application scope and packaging (sys_scope, sys_app, sys_scope_privilege), data model shape (sys_db_object extension depth, custom columns on vendor tables, dead custom tables), operational configuration (scheduled jobs, notifications, inbound email actions), outbound integration transport and authentication (sys_rest_message, sys_rest_message_fn), and change governance derived from the customisation ledger (sys_update_xml churn: what has actually been changed, by whom, and whether it was captured for release). Every rule re-derived from ServiceNow product documentation per D-015. Requires extraction groups 14-18.",
+  "rules": [
+    {
+      "id": "ROB-SCOPE-001",
+      "version": "0.1",
+      "category": "Application Scope",
+      "title": "Custom applications delivered in the global scope",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Global scope: all global applications share one scope and therefore bypass the scope protections that isolate applications from one another",
+        "ServiceNow product documentation, Application scope: a scoped application namespaces its artefacts and restricts what other applications may call"
+      ],
+      "doc_topics": [
+        "application scope",
+        "global scope",
+        "scoped application"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_app",
+        "where": [
+          {
+            "field": "is_global",
+            "equals": true
+          },
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "Application '{label}' is delivered in the global scope",
+        "affected_area": "sys_app (global scope)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "High",
+        "assumptions": "Moving an application into its own scope is a re-packaging exercise: artefacts must be recreated in the new scope, cross-scope access declared, and references repointed. Estimate per application, not per artefact."
+      },
+      "why": "{count} custom application(s) are delivered in the global scope. Global applications all share a single namespace, so they can read and write each other's tables and call each other's script includes without any privilege record being created or checked. A defect or a bad actor in one global application is therefore not contained to that application, and the platform team loses the ability to say which application owns which artefact.",
+      "remediation": "For each application, decide whether it should be scoped. New development should be created in its own scope from the outset. For existing global applications, plan a re-scope: create the scoped application, recreate its tables and scripts inside it, declare the cross-scope privileges it genuinely needs, then retire the global artefacts through a normal change. Where an application must stay global (for example a set of platform-wide UI extensions), record the decision and its justification in the accepted-risk register.",
+      "optimisation": "Add 'must be created in a dedicated scope' to the definition of done for new applications, and make the application picker's current scope part of the developer onboarding checklist so global work is a deliberate exception rather than the default.",
+      "false_positives": [
+        "Platform-wide extensions that legitimately have no scope of their own, such as shared UI scripts or global theme customisations",
+        "Applications inherited from an earlier implementation where a re-scope has already been assessed and formally accepted",
+        "A staging application in a sub-production instance that will be packaged into a scope before promotion"
+      ],
+      "fixture_cases": [
+        {
+          "name": "active global custom app triggers",
+          "triggers": true,
+          "tables": {
+            "sys_app": [
+              {
+                "sys_id": "a1",
+                "name": "Field Service Add-ons",
+                "scope": "global",
+                "active": true,
+                "is_global": true,
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "scoped app does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_app": [
+              {
+                "sys_id": "a2",
+                "name": "Vendor Risk",
+                "scope": "x_acme_vr",
+                "active": true,
+                "is_global": false,
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SCOPE-002",
+      "version": "0.1",
+      "category": "Application Scope",
+      "title": "Cross-scope privileges left unresolved",
+      "tier": "T1",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Cross-scope privilege record: the sys_scope_privilege status field carries requested, allowed or denied, and after application publication the system only allows runtime requests that have a valid cross-scope privilege record",
+        "ServiceNow product documentation, Runtime access tracking: privilege records are created in Tracking mode and enforced in Enforcing mode"
+      ],
+      "doc_topics": [
+        "cross scope privilege",
+        "runtime access tracking",
+        "application access"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_scope_privilege",
+        "where": [
+          {
+            "field": "status",
+            "equals": "requested"
+          }
+        ],
+        "label_field": "target_name",
+        "evidence_template": "{source_scope} requests {operation} on {target_name} in {target_scope}, still unresolved",
+        "affected_area": "sys_scope_privilege (requested)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "Each privilege is a single allow or deny decision on an existing record. The cost is the review, not the change.",
+        "conditional_modifiers": [
+          {
+            "modifier": "blast_radius",
+            "when_total_at_least": 20
+          }
+        ]
+      },
+      "why": "{count} cross-scope privilege request(s) are sitting in 'requested' status. These records exist because a script in one application reached into another. While runtime access tracking is in Tracking mode the access still happens and nothing fails, but nobody has decided whether it should be permitted. When the instance moves to Enforcing, every request that has not been explicitly allowed is refused at runtime, so a functional break is queued up behind a setting change that the platform team may not connect to these records.",
+      "remediation": "Review each request with the owning application team. Set status to Allowed where the access is intended and the operation is the least the caller needs, or Denied where it is not, and refactor the calling script to stop reaching across the boundary. Clear the backlog before switching runtime access tracking to Enforcing, and treat any new request record as a review item rather than a notification.",
+      "optimisation": "Add the count of unresolved privilege requests to the platform health dashboard. A rising count is an early signal that scope boundaries are being crossed faster than they are being reviewed.",
+      "false_positives": [
+        "An instance still in Tracking mode during initial application development, where request records are expected to accumulate until the application is published",
+        "Requests generated by a one-off migration or data load script that has since been removed",
+        "Requests created by a vendor application's own installation routine, which the vendor resolves on publication"
+      ],
+      "fixture_cases": [
+        {
+          "name": "requested privilege triggers",
+          "triggers": true,
+          "tables": {
+            "sys_scope_privilege": [
+              {
+                "sys_id": "p1",
+                "source_scope": "x_acme_vr",
+                "target_scope": "global",
+                "target_name": "incident",
+                "target_type": "table",
+                "operation": "write",
+                "status": "requested"
+              }
+            ]
+          }
+        },
+        {
+          "name": "resolved privileges do not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_scope_privilege": [
+              {
+                "sys_id": "p2",
+                "source_scope": "x_acme_vr",
+                "target_scope": "global",
+                "target_name": "incident",
+                "target_type": "table",
+                "operation": "read",
+                "status": "allowed"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SCOPE-003",
+      "version": "0.1",
+      "category": "Application Scope",
+      "title": "Cross-scope write access granted into other applications",
+      "tier": "T1",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Cross-scope privilege record: tables support the read, write, create and delete operations, and an allowed record permits that operation at runtime from the source scope",
+        "ServiceNow product documentation, Application access settings: an application declares what other applications may do to its resources, and a granted write is a standing permission rather than a one-off"
+      ],
+      "doc_topics": [
+        "cross scope privilege",
+        "application access",
+        "scope protection"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_scope_privilege",
+        "where": [
+          {
+            "field": "status",
+            "equals": "allowed"
+          },
+          {
+            "field": "operation",
+            "in": [
+              "write",
+              "create",
+              "delete"
+            ]
+          },
+          {
+            "field": "target_type",
+            "equals": "table"
+          }
+        ],
+        "label_field": "target_name",
+        "evidence_template": "{source_scope} may {operation} {target_name} in {target_scope}",
+        "affected_area": "sys_scope_privilege (allowed write)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Revoking a privilege is a one-field change, but confirming that the caller no longer needs it requires reading the calling script and regression testing the application that owns it.",
+        "conditional_modifiers": [
+          {
+            "modifier": "blast_radius",
+            "when_total_at_least": 15
+          }
+        ],
+        "effort_escalation": [
+          {
+            "when_total_at_least": 25,
+            "effort": "High"
+          }
+        ]
+      },
+      "why": "{count} cross-scope privilege(s) grant write, create or delete access from one application into another application's tables. Each one is a standing hole in the scope boundary: the source application can change data it does not own, and the owning application's business rules, ACL design and audit expectations are all written on the assumption that it does. When something corrupts that data, the owning team's code is the first place anyone looks, and the actual writer is in a different application entirely.",
+      "remediation": "For each grant, read the calling script and establish what it actually writes. Replace direct table writes with a scoped API on the owning application (a script include the owner publishes and supports), then revoke the table privilege. Where a direct write must remain, narrow the operation to the minimum needed, record the owning team's approval, and add the dependency to the owning application's change impact list.",
+      "optimisation": "Ask each application team to publish the scoped API other applications should call. Once a supported entry point exists, the write privileges become removable rather than merely undesirable.",
+      "false_positives": [
+        "Integration applications whose stated purpose is to write into a platform table, for example an inbound ticketing bridge writing to incident",
+        "Privileges granted deliberately in advance by administrators to communicate expected access, as described in the ServiceNow cross-scope privilege documentation",
+        "Privileges against a table the source application itself created in an earlier, pre-scope implementation"
+      ],
+      "fixture_cases": [
+        {
+          "name": "allowed cross-scope write triggers",
+          "triggers": true,
+          "tables": {
+            "sys_scope_privilege": [
+              {
+                "sys_id": "p3",
+                "source_scope": "x_acme_vr",
+                "target_scope": "global",
+                "target_name": "cmdb_ci",
+                "target_type": "table",
+                "operation": "write",
+                "status": "allowed"
+              }
+            ]
+          }
+        },
+        {
+          "name": "read-only privilege does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_scope_privilege": [
+              {
+                "sys_id": "p4",
+                "source_scope": "x_acme_vr",
+                "target_scope": "global",
+                "target_name": "cmdb_ci",
+                "target_type": "table",
+                "operation": "read",
+                "status": "allowed"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SCOPE-004",
+      "version": "0.1",
+      "category": "Application Scope",
+      "title": "Custom tables created in the global scope",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Global scope: global applications share a single scope and bypass the protections that isolate application data",
+        "ServiceNow product documentation, Table administration: a table belongs to the application scope that created it, and that scope determines which applications may access it by default"
+      ],
+      "doc_topics": [
+        "table scope",
+        "global scope",
+        "custom table"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_db_object",
+        "where": [
+          {
+            "field": "is_custom",
+            "equals": true
+          },
+          {
+            "field": "scope",
+            "equals": "global"
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "Custom table {label} lives in the global scope",
+        "affected_area": "sys_db_object (custom, global scope)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "High",
+        "assumptions": "A table cannot be re-scoped in place. The realistic path is a new scoped table plus a data migration, so estimate per table including its dependent artefacts.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 25
+          }
+        ]
+      },
+      "why": "{count} custom table(s) sit in the global scope. Any global script can read and write them, they carry no application ownership, and they cannot be moved as a unit when the functionality they support is eventually packaged. Over time this is how an instance ends up with a data model nobody can attribute to a business capability.",
+      "remediation": "Group the tables by the business capability they serve and create a scoped application per capability. New tables go into that scope from the start. For existing tables, prioritise those holding sensitive or business-critical data: create the scoped equivalent, migrate the data through a controlled load, repoint references, then retire the global table. Leave low-value tables in place and record them as accepted debt rather than spending migration effort on them.",
+      "optimisation": "Publish the scope-to-capability map alongside the CMDB service model, so the data model and the service model describe the same organisation of the platform.",
+      "false_positives": [
+        "Tables extending a platform base class that must remain global to inherit correctly, for example a custom task extension used across applications",
+        "Reference or lookup tables shared deliberately across every application",
+        "Tables created before the customer adopted scoped application development, already logged as known debt"
+      ],
+      "fixture_cases": [
+        {
+          "name": "global custom table triggers",
+          "triggers": true,
+          "tables": {
+            "sys_db_object": [
+              {
+                "sys_id": "t1",
+                "name": "u_vendor_review",
+                "scope": "global",
+                "is_custom": true,
+                "extension_depth": 1,
+                "extension_root": "task"
+              }
+            ]
+          }
+        },
+        {
+          "name": "scoped custom table does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_db_object": [
+              {
+                "sys_id": "t2",
+                "name": "x_acme_vr_review",
+                "scope": "x_acme_vr",
+                "is_custom": true,
+                "extension_depth": 1,
+                "extension_root": "task"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-DM-001",
+      "version": "0.1",
+      "category": "Data Model",
+      "title": "Custom tables extending deep into a table hierarchy",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Table extension: an extended table inherits every field, business rule, client script and access control defined on its parent chain",
+        "ServiceNow product documentation, Table administration: queries against a base class read across all extending tables, so hierarchy depth is a query cost as well as a maintenance cost"
+      ],
+      "doc_topics": [
+        "table extension",
+        "table hierarchy",
+        "extends table"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_db_object",
+        "where": [
+          {
+            "field": "is_custom",
+            "equals": true
+          },
+          {
+            "field": "extension_depth",
+            "gte": 4
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "{label} sits {extension_depth} levels below {extension_root}",
+        "affected_area": "sys_db_object (deep extension)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "High",
+        "assumptions": "Flattening a hierarchy means recreating the table against a shallower parent and migrating data. Estimate per table, including regression testing of everything that queries the base class."
+      },
+      "why": "{count} custom table(s) extend four or more levels below their root class. Every level adds inherited fields, business rules and access controls that records on the child table carry whether or not they need them, and a query against the root class has to reach across all of them. Deep hierarchies are also where upgrade problems concentrate, because a vendor change anywhere in the chain lands on the child.",
+      "remediation": "For each table, establish which parent behaviour it actually uses. Where it uses little of it, recreate the table against a shallower parent (often the platform base class directly) and migrate the data. Where the inheritance is genuinely needed, document why, so the next reviewer does not re-open the question. Do not extend an already-extended custom table: prefer a sibling under the same parent.",
+      "optimisation": "Set a maximum extension depth in the platform development standard and check it at design review, before the table exists and a migration is the only remedy.",
+      "false_positives": [
+        "Tables extending a vendor hierarchy that is itself deep, for example a CMDB CI class where the depth is ServiceNow's design and not the customer's choice",
+        "Deliberate class hierarchies that mirror a real domain taxonomy and are queried at the leaf level",
+        "Tables from an installed store application whose structure the customer does not control"
+      ],
+      "fixture_cases": [
+        {
+          "name": "deep custom table triggers",
+          "triggers": true,
+          "tables": {
+            "sys_db_object": [
+              {
+                "sys_id": "t3",
+                "name": "u_special_change",
+                "scope": "global",
+                "is_custom": true,
+                "extension_depth": 5,
+                "extension_root": "task"
+              }
+            ]
+          }
+        },
+        {
+          "name": "shallow custom table does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_db_object": [
+              {
+                "sys_id": "t4",
+                "name": "u_simple_log",
+                "scope": "global",
+                "is_custom": true,
+                "extension_depth": 1,
+                "extension_root": "sys_metadata"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-DM-002",
+      "version": "0.1",
+      "category": "Data Model",
+      "title": "Custom columns concentrated on core platform tables",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Dictionary entries: a custom field added to a base table is a dictionary customisation that the instance carries through every upgrade",
+        "ServiceNow product documentation, Upgrade planning: customisations to baseline tables are the records most likely to require review after an upgrade"
+      ],
+      "doc_topics": [
+        "dictionary entry",
+        "custom field",
+        "table customisation"
+      ],
+      "detect": {
+        "type": "count_threshold",
+        "table": "sys_dictionary_custom_columns",
+        "threshold": 40,
+        "direction": "above",
+        "where": [
+          {
+            "field": "table",
+            "in": [
+              "incident",
+              "change_request",
+              "problem",
+              "task",
+              "sc_request",
+              "sc_req_item",
+              "sc_task",
+              "cmdb_ci",
+              "sys_user",
+              "sys_user_group"
+            ]
+          }
+        ],
+        "label_field": "element",
+        "affected_area": "sys_dictionary (custom columns on core tables)",
+        "evidence_template": "{table}.{element} ({type})"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "High",
+        "assumptions": "Retiring a field means proving nothing reads it: reports, forms, integrations and scripts all have to be checked. Estimate per field, not per table."
+      },
+      "why": "{count} custom column(s) have been added to core platform tables, above the threshold of {threshold}. Adding fields to baseline tables is supported and often correct, but at volume it becomes a cost the instance pays forever: every upgrade carries them, every form layout has to accommodate them, and every integration has to be told which of them matter. Concentrations at this level usually contain fields that were added for a project that has since ended and that nothing reads any more.",
+      "remediation": "Produce the list of custom fields per core table with their last-populated date and their use in reports, forms and integrations. Retire the fields nothing reads, starting with those that are empty across all records. For the fields that stay, confirm each is on a form or in a report, so its purpose is visible to the next person. Where a group of fields describes a distinct entity, move them to a related table rather than widening the core table further.",
+      "optimisation": "Require a data-model review before a field is added to a baseline table, and prefer extending a related table or using an existing field over widening incident, change_request or cmdb_ci again.",
+      "false_positives": [
+        "Instances that have deliberately extended incident or change_request to support a regulated process where the fields are all in active use",
+        "Fields created by an installed store application that happen to use the u_ prefix",
+        "A recent, deliberate data-model expansion that has not yet been reflected in the platform standard"
+      ],
+      "fixture_cases": [
+        {
+          "name": "many custom columns on core tables triggers",
+          "triggers": true,
+          "tables": {
+            "sys_dictionary_custom_columns": [
+              {
+                "sys_id": "d0",
+                "table": "incident",
+                "element": "u_extra_0",
+                "type": "string"
+              },
+              {
+                "sys_id": "d1",
+                "table": "incident",
+                "element": "u_extra_1",
+                "type": "string"
+              },
+              {
+                "sys_id": "d2",
+                "table": "incident",
+                "element": "u_extra_2",
+                "type": "string"
+              },
+              {
+                "sys_id": "d3",
+                "table": "incident",
+                "element": "u_extra_3",
+                "type": "string"
+              },
+              {
+                "sys_id": "d4",
+                "table": "incident",
+                "element": "u_extra_4",
+                "type": "string"
+              },
+              {
+                "sys_id": "d5",
+                "table": "incident",
+                "element": "u_extra_5",
+                "type": "string"
+              },
+              {
+                "sys_id": "d6",
+                "table": "incident",
+                "element": "u_extra_6",
+                "type": "string"
+              },
+              {
+                "sys_id": "d7",
+                "table": "incident",
+                "element": "u_extra_7",
+                "type": "string"
+              },
+              {
+                "sys_id": "d8",
+                "table": "incident",
+                "element": "u_extra_8",
+                "type": "string"
+              },
+              {
+                "sys_id": "d9",
+                "table": "incident",
+                "element": "u_extra_9",
+                "type": "string"
+              },
+              {
+                "sys_id": "d10",
+                "table": "incident",
+                "element": "u_extra_10",
+                "type": "string"
+              },
+              {
+                "sys_id": "d11",
+                "table": "incident",
+                "element": "u_extra_11",
+                "type": "string"
+              },
+              {
+                "sys_id": "d12",
+                "table": "incident",
+                "element": "u_extra_12",
+                "type": "string"
+              },
+              {
+                "sys_id": "d13",
+                "table": "incident",
+                "element": "u_extra_13",
+                "type": "string"
+              },
+              {
+                "sys_id": "d14",
+                "table": "incident",
+                "element": "u_extra_14",
+                "type": "string"
+              },
+              {
+                "sys_id": "d15",
+                "table": "incident",
+                "element": "u_extra_15",
+                "type": "string"
+              },
+              {
+                "sys_id": "d16",
+                "table": "incident",
+                "element": "u_extra_16",
+                "type": "string"
+              },
+              {
+                "sys_id": "d17",
+                "table": "incident",
+                "element": "u_extra_17",
+                "type": "string"
+              },
+              {
+                "sys_id": "d18",
+                "table": "incident",
+                "element": "u_extra_18",
+                "type": "string"
+              },
+              {
+                "sys_id": "d19",
+                "table": "incident",
+                "element": "u_extra_19",
+                "type": "string"
+              },
+              {
+                "sys_id": "d20",
+                "table": "incident",
+                "element": "u_extra_20",
+                "type": "string"
+              },
+              {
+                "sys_id": "d21",
+                "table": "incident",
+                "element": "u_extra_21",
+                "type": "string"
+              },
+              {
+                "sys_id": "d22",
+                "table": "incident",
+                "element": "u_extra_22",
+                "type": "string"
+              },
+              {
+                "sys_id": "d23",
+                "table": "incident",
+                "element": "u_extra_23",
+                "type": "string"
+              },
+              {
+                "sys_id": "d24",
+                "table": "incident",
+                "element": "u_extra_24",
+                "type": "string"
+              },
+              {
+                "sys_id": "d25",
+                "table": "incident",
+                "element": "u_extra_25",
+                "type": "string"
+              },
+              {
+                "sys_id": "d26",
+                "table": "incident",
+                "element": "u_extra_26",
+                "type": "string"
+              },
+              {
+                "sys_id": "d27",
+                "table": "incident",
+                "element": "u_extra_27",
+                "type": "string"
+              },
+              {
+                "sys_id": "d28",
+                "table": "incident",
+                "element": "u_extra_28",
+                "type": "string"
+              },
+              {
+                "sys_id": "d29",
+                "table": "incident",
+                "element": "u_extra_29",
+                "type": "string"
+              },
+              {
+                "sys_id": "d30",
+                "table": "incident",
+                "element": "u_extra_30",
+                "type": "string"
+              },
+              {
+                "sys_id": "d31",
+                "table": "incident",
+                "element": "u_extra_31",
+                "type": "string"
+              },
+              {
+                "sys_id": "d32",
+                "table": "incident",
+                "element": "u_extra_32",
+                "type": "string"
+              },
+              {
+                "sys_id": "d33",
+                "table": "incident",
+                "element": "u_extra_33",
+                "type": "string"
+              },
+              {
+                "sys_id": "d34",
+                "table": "incident",
+                "element": "u_extra_34",
+                "type": "string"
+              },
+              {
+                "sys_id": "d35",
+                "table": "incident",
+                "element": "u_extra_35",
+                "type": "string"
+              },
+              {
+                "sys_id": "d36",
+                "table": "incident",
+                "element": "u_extra_36",
+                "type": "string"
+              },
+              {
+                "sys_id": "d37",
+                "table": "incident",
+                "element": "u_extra_37",
+                "type": "string"
+              },
+              {
+                "sys_id": "d38",
+                "table": "incident",
+                "element": "u_extra_38",
+                "type": "string"
+              },
+              {
+                "sys_id": "d39",
+                "table": "incident",
+                "element": "u_extra_39",
+                "type": "string"
+              },
+              {
+                "sys_id": "d40",
+                "table": "incident",
+                "element": "u_extra_40",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        {
+          "name": "few custom columns does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_dictionary_custom_columns": [
+              {
+                "sys_id": "d1",
+                "table": "incident",
+                "element": "u_impacted_region",
+                "type": "string"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-DM-003",
+      "version": "0.1",
+      "category": "Data Model",
+      "title": "Custom tables holding no records",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Table administration: a table carries its dictionary, access controls and business rules whether or not it holds data",
+        "ServiceNow product documentation, Upgrade planning: unused customisations still require review at upgrade, so retiring them reduces upgrade scope directly"
+      ],
+      "doc_topics": [
+        "custom table",
+        "delete table",
+        "table administration"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_db_object",
+        "where": [
+          {
+            "field": "is_custom",
+            "equals": true
+          },
+          {
+            "field": "row_count",
+            "equals": 0
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "Custom table {label} holds no records",
+        "affected_area": "sys_db_object (empty custom tables)"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Deleting an empty table is a single administrative action once its dependent artefacts are confirmed unused. The effort is the confirmation, not the deletion.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 10
+          }
+        ]
+      },
+      "why": "{count} custom table(s) hold no records at all. Each one still carries a dictionary, access controls, any business rules written against it and, usually, a set of forms and lists nobody opens. They appear in table pickers, in reporting sources and in every upgrade review, and they make the real data model harder to find. An empty custom table is either a project that never launched or one that has been decommissioned without cleanup.",
+      "remediation": "For each table, confirm it is genuinely unused: check for scripts, flows, integrations and reports that reference it, and confirm with the requesting team that the process it supported has ended. Delete the confirmed-dead tables through a normal change, capturing the deletion in an update set so it can be reversed. Keep tables that are staged for an imminent go-live, and note the expected date so the next scan can tell the difference.",
+      "optimisation": "Add a decommissioning step to the project closure checklist, so tables created for a project are removed with the project rather than surviving it.",
+      "false_positives": [
+        "Tables staged ahead of a planned go-live that has not happened yet",
+        "Reference tables populated only in production, scanned in a sub-production instance",
+        "Tables that exist only to be extended by other tables and are never populated directly"
+      ],
+      "fixture_cases": [
+        {
+          "name": "empty custom table triggers",
+          "triggers": true,
+          "tables": {
+            "sys_db_object": [
+              {
+                "sys_id": "t5",
+                "name": "u_pilot_survey",
+                "scope": "global",
+                "is_custom": true,
+                "row_count": 0,
+                "extension_depth": 1
+              }
+            ]
+          }
+        },
+        {
+          "name": "populated custom table does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_db_object": [
+              {
+                "sys_id": "t6",
+                "name": "u_vendor_review",
+                "scope": "global",
+                "is_custom": true,
+                "row_count": 812,
+                "extension_depth": 1
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-OPS-001",
+      "version": "0.1",
+      "category": "Operational Configuration",
+      "title": "Scheduled jobs running as an inactive user",
+      "tier": "T1",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Scheduled script execution: the Run as field determines the user context, and therefore the roles and access controls, under which the job's script executes",
+        "ServiceNow product documentation, User administration: deactivating a user removes their ability to authenticate and is the standard leaver control"
+      ],
+      "doc_topics": [
+        "scheduled job",
+        "scheduled script execution",
+        "run as user"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sysauto_script",
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "run_as_inactive",
+            "equals": true
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "Scheduled job '{label}' runs as an inactive user",
+        "affected_area": "sysauto_script (inactive run-as)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Repointing a job at a service account is a single field change per job once the account exists. Creating the service account is a one-off."
+      },
+      "why": "{count} active scheduled job(s) run in the context of a user who has been deactivated. The job's access is whatever that departed person's roles were, which means a leaver's privileges are still executing on a schedule after the leaver control was applied. It also makes the job fragile: the account can be deleted or have its roles stripped by a routine access review, and the job then fails silently at its next run with no obvious owner to notice.",
+      "remediation": "Create or identify a named service account for scheduled execution, grant it only the roles the job needs, and repoint each affected job's Run as field at it. Do not simply reactivate the departed user. Confirm each job still completes after the change, and add the service account to the access review scope so its privileges are reviewed like any other.",
+      "optimisation": "Standardise on one service account per functional area rather than per job, and record the owning team on the job record, so a failing job has an owner without anyone having to trace who wrote it.",
+      "false_positives": [
+        "A service account that is deliberately marked inactive to block interactive login while still being used for scheduled execution, which is a valid pattern on some instances",
+        "Jobs pointing at a user recently deactivated as part of an in-flight leaver process where a replacement has already been agreed",
+        "Sub-production instances where user data has been scrambled or bulk-deactivated after a clone"
+      ],
+      "fixture_cases": [
+        {
+          "name": "job running as inactive user triggers",
+          "triggers": true,
+          "tables": {
+            "sysauto_script": [
+              {
+                "sys_id": "j1",
+                "name": "Nightly CI reconciliation",
+                "active": true,
+                "run_as": "u9",
+                "run_as_inactive": true,
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "job running as active user does not trigger",
+          "triggers": false,
+          "tables": {
+            "sysauto_script": [
+              {
+                "sys_id": "j2",
+                "name": "Nightly CI reconciliation",
+                "active": true,
+                "run_as": "u1",
+                "run_as_inactive": false,
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-OPS-002",
+      "version": "0.1",
+      "category": "Operational Configuration",
+      "title": "Active notifications with no recipients",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Create an email notification: the Who will receive tab defines users, groups and recipient fields, and a notification with none of them resolves to no addressee",
+        "ServiceNow product documentation, Notification troubleshooting: notifications that produce no recipient are recorded as send-ignored rather than delivered"
+      ],
+      "doc_topics": [
+        "email notification",
+        "notification recipients",
+        "who will receive"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sysevent_email_action",
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "has_recipients",
+            "equals": false
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "Notification '{label}' is active but names no recipient",
+        "affected_area": "sysevent_email_action (no recipients)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Either set a recipient or deactivate. One decision per notification, no code change.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 15
+          }
+        ]
+      },
+      "why": "{count} active notification(s) name no users, no groups and no recipient fields. They fire, cost processing, and deliver to nobody. The operational risk is that someone believes they are covered: a notification called 'Major incident escalation' that resolves to no addressee looks like a working control on the configuration list and is not one. These are also the notifications people cite when they say the platform 'sent nothing' during an incident.",
+      "remediation": "For each notification, establish from its name and condition who it was meant to reach. Where the audience is real, add the group or recipient field and test with a controlled event. Where it is obsolete, deactivate it rather than leaving it in place. Prioritise anything whose name implies an escalation, approval or outage path, because those are the ones people are relying on.",
+      "optimisation": "Include the notification set in the incident and change process reviews, so audience changes follow process changes instead of drifting apart from them.",
+      "false_positives": [
+        "Notifications whose recipients are resolved entirely in a script or a subscription mechanism rather than on the record",
+        "Notification templates kept deliberately as a base for others to copy",
+        "Notifications driven by a mailing list or distribution address configured outside ServiceNow"
+      ],
+      "fixture_cases": [
+        {
+          "name": "active notification with no recipients triggers",
+          "triggers": true,
+          "tables": {
+            "sysevent_email_action": [
+              {
+                "sys_id": "n1",
+                "name": "Major incident escalation",
+                "active": true,
+                "has_recipients": false,
+                "recipient_users": "",
+                "recipient_fields": "",
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "notification with recipients does not trigger",
+          "triggers": false,
+          "tables": {
+            "sysevent_email_action": [
+              {
+                "sys_id": "n2",
+                "name": "Major incident escalation",
+                "active": true,
+                "has_recipients": true,
+                "recipient_fields": "assigned_to",
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-OPS-003",
+      "version": "0.1",
+      "category": "Operational Configuration",
+      "title": "Inbound email actions running scripts without a condition",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Inbound email actions: an inbound action runs against messages the instance receives, and the condition determines which messages it applies to",
+        "ServiceNow product documentation, Inbound email action execution order: actions are evaluated in order and an unconditioned action applies to every message of its type"
+      ],
+      "doc_topics": [
+        "inbound email action",
+        "email condition",
+        "inbound action script"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sysevent_in_email_action",
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "condition",
+            "empty": true
+          },
+          {
+            "field": "script",
+            "empty": false
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "Inbound email action '{label}' runs a script against every inbound message of its type",
+        "affected_area": "sysevent_in_email_action (unconditioned)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Writing a condition requires knowing the message shapes the action is meant to handle, which usually means reading real inbound mail samples."
+      },
+      "why": "{count} active inbound email action(s) run a script with no condition, so the script executes against every inbound message of its type. Inbound mail is the least controlled input the platform has: anyone who can reach the instance mailbox can trigger the script. An unconditioned action turns a mail-parsing script into an open endpoint, and it also makes the action ordering unpredictable, because an action that matches everything blocks the more specific ones behind it.",
+      "remediation": "For each action, add a condition that identifies the messages it is meant to handle, using the subject pattern, sender domain or watermark rather than matching everything. Review the script for what it does with unvalidated message content, particularly anything that writes to a record or evaluates message text. Re-check the inbound action order after adding conditions, so specific actions are reached.",
+      "optimisation": "Route distinct inbound flows to distinct mailboxes or aliases where the platform supports it. A condition on the receiving address is far more robust than a condition on message content.",
+      "false_positives": [
+        "A deliberate catch-all action placed last in the order to log or discard unmatched mail",
+        "Actions on an instance whose mailbox is reachable only from an internal relay, where the input is not open",
+        "Actions whose filtering is applied entirely inside the script rather than in the condition field"
+      ],
+      "fixture_cases": [
+        {
+          "name": "unconditioned scripted inbound action triggers",
+          "triggers": true,
+          "tables": {
+            "sysevent_in_email_action": [
+              {
+                "sys_id": "e1",
+                "name": "Create incident from mail",
+                "active": true,
+                "condition": "",
+                "script": "current.short_description = email.subject;",
+                "type": "new",
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "conditioned inbound action does not trigger",
+          "triggers": false,
+          "tables": {
+            "sysevent_in_email_action": [
+              {
+                "sys_id": "e2",
+                "name": "Create incident from mail",
+                "active": true,
+                "condition": "email.subject.startsWith('INC')",
+                "script": "current.short_description = email.subject;",
+                "type": "new",
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-OPS-004",
+      "version": "0.1",
+      "category": "Operational Configuration",
+      "title": "Inactive scheduled jobs retained in the instance",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Scheduled script execution: an inactive scheduled job is retained but never runs",
+        "ServiceNow product documentation, Upgrade planning: retained but unused customisations still appear in upgrade and configuration reviews"
+      ],
+      "doc_topics": [
+        "scheduled job",
+        "scheduled script execution",
+        "inactive job"
+      ],
+      "detect": {
+        "type": "count_threshold",
+        "table": "sysauto_script",
+        "threshold": 15,
+        "direction": "above",
+        "where": [
+          {
+            "field": "active",
+            "equals": false
+          }
+        ],
+        "label_field": "name",
+        "affected_area": "sysauto_script (inactive)",
+        "evidence_template": "Scheduled job '{label}' is inactive"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Deletion is one action per job once ownership is confirmed; the confirmation is the work."
+      },
+      "why": "{count} scheduled job(s) are inactive, above the threshold of {threshold}. Each carries a script that still refers to tables, fields and integrations, and each is a candidate for someone to reactivate without knowing why it was switched off. Deactivation is often used as a substitute for deletion during an incident, and the temporary switch-off then becomes permanent without a record of the reason.",
+      "remediation": "Review the inactive jobs with the platform team. Delete the ones whose purpose has ended, capturing the deletion in an update set. For any job that is deliberately dormant, put the reason and the reactivation condition in its description, so the next person does not have to guess. Pay particular attention to jobs whose scripts reference tables or integrations that no longer exist.",
+      "optimisation": "Adopt a convention that a job is deactivated only with a dated note in its description, and add an annual sweep of inactive jobs to the platform operating calendar.",
+      "false_positives": [
+        "Jobs deliberately inactive in sub-production instances so that a clone does not fire integrations at production systems",
+        "Seasonal jobs activated only during a specific period such as year-end",
+        "Vendor-supplied jobs shipped inactive by design"
+      ],
+      "fixture_cases": [
+        {
+          "name": "many inactive jobs triggers",
+          "triggers": true,
+          "tables": {
+            "sysauto_script": [
+              {
+                "sys_id": "j0",
+                "name": "Legacy sync 0",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j1",
+                "name": "Legacy sync 1",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j2",
+                "name": "Legacy sync 2",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j3",
+                "name": "Legacy sync 3",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j4",
+                "name": "Legacy sync 4",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j5",
+                "name": "Legacy sync 5",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j6",
+                "name": "Legacy sync 6",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j7",
+                "name": "Legacy sync 7",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j8",
+                "name": "Legacy sync 8",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j9",
+                "name": "Legacy sync 9",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j10",
+                "name": "Legacy sync 10",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j11",
+                "name": "Legacy sync 11",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j12",
+                "name": "Legacy sync 12",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j13",
+                "name": "Legacy sync 13",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j14",
+                "name": "Legacy sync 14",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              },
+              {
+                "sys_id": "j15",
+                "name": "Legacy sync 15",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "few inactive jobs does not trigger",
+          "triggers": false,
+          "tables": {
+            "sysauto_script": [
+              {
+                "sys_id": "j1",
+                "name": "Legacy sync",
+                "active": false,
+                "run_as_inactive": false,
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-INT-001",
+      "version": "0.1",
+      "category": "Integrations",
+      "title": "Outbound REST messages using cleartext transport",
+      "tier": "T1",
+      "owner": "Integration team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow Instance Security Hardening Settings, Communications control: outbound connections are expected to use TLS, with strong ciphers and verified certificates",
+        "ServiceNow product documentation, Outbound REST message: the endpoint field determines the protocol used for every function defined under the message"
+      ],
+      "doc_topics": [
+        "outbound rest message",
+        "rest endpoint",
+        "TLS encryption"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_rest_message",
+        "where": [
+          {
+            "field": "insecure_transport",
+            "equals": true
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "REST message '{label}' calls {rest_endpoint} over cleartext HTTP",
+        "affected_area": "sys_rest_message (http endpoint)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "Changing the endpoint to https is a one-field change, provided the target system already offers TLS. Where it does not, the effort belongs to the target system's owner."
+      },
+      "why": "{count} outbound REST message(s) call an endpoint over cleartext http. Everything the instance sends on that call, including the credentials used to authenticate and whatever record data the payload carries, crosses the network unprotected and can be read or altered in transit. This is also one of the findings an external security assessment will pick up first, because it is visible without any access to the instance's data.",
+      "remediation": "For each message, confirm the target system offers an https endpoint and change the endpoint accordingly, then re-test the integration end to end. Where the target genuinely offers no TLS, route the call through a MID Server on a controlled network segment and record the exception with a remediation date. Rotate any credential that has been used over the cleartext endpoint, because it has been exposed.",
+      "optimisation": "Add an https-only check to the integration design checklist, so a cleartext endpoint has to be justified before it is built rather than discovered afterwards.",
+      "false_positives": [
+        "Endpoints pointing at a loopback or MID Server-local address where the traffic never leaves the host",
+        "Development-only messages in a sub-production instance pointing at a test harness",
+        "Messages retained for reference but no longer invoked by any script or flow"
+      ],
+      "fixture_cases": [
+        {
+          "name": "http endpoint triggers",
+          "triggers": true,
+          "tables": {
+            "sys_rest_message": [
+              {
+                "sys_id": "m1",
+                "name": "Vendor sync",
+                "rest_endpoint": "http://vendor.example.com/api",
+                "authentication_type": "basic",
+                "insecure_transport": true,
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "https endpoint does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_rest_message": [
+              {
+                "sys_id": "m2",
+                "name": "Vendor sync",
+                "rest_endpoint": "https://vendor.example.com/api",
+                "authentication_type": "basic",
+                "insecure_transport": false,
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-INT-002",
+      "version": "0.1",
+      "category": "Integrations",
+      "title": "REST message functions overriding the endpoint with cleartext transport",
+      "tier": "T1",
+      "owner": "Integration team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, REST message function: a function may override the parent message's endpoint, and the function's endpoint is the one actually called",
+        "ServiceNow Instance Security Hardening Settings, Communications control: outbound connections are expected to use TLS"
+      ],
+      "doc_topics": [
+        "rest message function",
+        "rest endpoint",
+        "TLS encryption"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_rest_message_fn",
+        "where": [
+          {
+            "field": "insecure_transport",
+            "equals": true
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "REST function '{label}' on message {rest_message} calls {rest_endpoint} over cleartext HTTP",
+        "affected_area": "sys_rest_message_fn (http endpoint)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "One endpoint field per function. The check is quick; the retest of the calling flow is the real cost."
+      },
+      "why": "{count} REST message function(s) call a cleartext http endpoint. A function-level endpoint overrides the parent message, so a message that looks correctly configured at the top level can still be making unprotected calls underneath. This is the version of the problem that a configuration review at message level misses entirely.",
+      "remediation": "Change each function's endpoint to https and re-test the calling flow or script, not just the function's own test. Where the function inherited an override it does not need, clear it so the function follows the parent message and there is one endpoint to govern rather than two. Rotate credentials used over the cleartext path.",
+      "optimisation": "Prefer inheriting the parent endpoint over per-function overrides. Fewer places to set the endpoint means fewer places for it to be wrong.",
+      "false_positives": [
+        "Functions pointing at a loopback or MID Server-local address",
+        "Development-only functions in a sub-production instance",
+        "Functions retained for reference and not invoked"
+      ],
+      "fixture_cases": [
+        {
+          "name": "http function endpoint triggers",
+          "triggers": true,
+          "tables": {
+            "sys_rest_message_fn": [
+              {
+                "sys_id": "f1",
+                "name": "getAssets",
+                "rest_message": "Vendor sync",
+                "rest_endpoint": "http://vendor.example.com/api/assets",
+                "authentication_type": "",
+                "insecure_transport": true,
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "https function endpoint does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_rest_message_fn": [
+              {
+                "sys_id": "f2",
+                "name": "getAssets",
+                "rest_message": "Vendor sync",
+                "rest_endpoint": "https://vendor.example.com/api/assets",
+                "authentication_type": "",
+                "insecure_transport": false,
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-INT-003",
+      "version": "0.1",
+      "category": "Integrations",
+      "title": "Outbound REST messages with no declared authentication",
+      "tier": "T2",
+      "owner": "Integration team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Outbound REST message: the authentication type field selects basic, OAuth 2.0, mutual authentication or no authentication for the message",
+        "ServiceNow Instance Security Hardening Settings: outbound integrations are expected to authenticate to the systems they call rather than relying on network position"
+      ],
+      "doc_topics": [
+        "outbound rest message",
+        "rest authentication",
+        "basic auth profile"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_rest_message",
+        "where": [
+          {
+            "field": "authentication_type",
+            "in": [
+              "",
+              "no_authentication",
+              "none"
+            ]
+          }
+        ],
+        "label_field": "name",
+        "evidence_template": "REST message '{label}' to {rest_endpoint} declares no authentication",
+        "affected_area": "sys_rest_message (no authentication)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Medium",
+        "assumptions": "Adding authentication requires a credential or OAuth profile from the target system's owner, so the effort is coordination rather than configuration.",
+        "conditional_modifiers": [
+          {
+            "modifier": "blast_radius",
+            "when_total_at_least": 10
+          }
+        ]
+      },
+      "why": "{count} outbound REST message(s) declare no authentication. Either the call carries credentials embedded in a header or the URL, where they are invisible to credential governance and cannot be rotated centrally, or the target system accepts unauthenticated calls, which means anything that can reach it can act as this instance. Both cases fail the basic question an auditor asks about an integration: how does the far end know this is you.",
+      "remediation": "For each message, establish how the target actually authenticates the call today. Move embedded credentials into a ServiceNow basic auth or OAuth profile so they are stored, referenced and rotated centrally, and set the message's authentication type accordingly. Where the target is genuinely open, raise it with the owning team rather than treating it as this instance's finding alone, and record the exception with a date.",
+      "optimisation": "Standardise on OAuth where the target supports it, so credential rotation stops being a change request against every integration that touches the system.",
+      "false_positives": [
+        "Public endpoints that require no authentication by design, such as a public status or reference feed",
+        "Messages whose authentication is applied by a MID Server or an upstream gateway rather than by the message record",
+        "Messages that pass a token in a header populated at runtime, which is authenticated but not declared on the record"
+      ],
+      "fixture_cases": [
+        {
+          "name": "unauthenticated rest message triggers",
+          "triggers": true,
+          "tables": {
+            "sys_rest_message": [
+              {
+                "sys_id": "m3",
+                "name": "Vendor feed",
+                "rest_endpoint": "https://vendor.example.com/feed",
+                "authentication_type": "",
+                "insecure_transport": false,
+                "oob": false
+              }
+            ]
+          }
+        },
+        {
+          "name": "authenticated rest message does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_rest_message": [
+              {
+                "sys_id": "m4",
+                "name": "Vendor feed",
+                "rest_endpoint": "https://vendor.example.com/feed",
+                "authentication_type": "oauth2",
+                "insecure_transport": false,
+                "oob": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CHG-001",
+      "version": "0.1",
+      "category": "Change & Release Governance",
+      "title": "Customisations captured only in a Default update set",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Default update set: the global default set provides system functionality and should not be changed, deleted or moved between systems",
+        "ServiceNow product documentation, Update sets: an update set is the unit that moves configuration between instances, and only user-created sets are intended to be exported"
+      ],
+      "doc_topics": [
+        "default update set",
+        "update set",
+        "capture customisation"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_update_xml_churn",
+        "where": [
+          {
+            "field": "in_default_update_set",
+            "equals": true
+          }
+        ],
+        "label_field": "target_name",
+        "evidence_template": "{type} '{label}' was changed in the Default update set ({update_count} update(s))",
+        "affected_area": "sys_update_xml (Default update set)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "Medium",
+        "assumptions": "Recovering a change from Default means recreating it in a named set or exporting the individual update records, then retesting. Estimate per artefact, and higher where the change spans several artefacts that must move together.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 30
+          }
+        ],
+        "effort_escalation": [
+          {
+            "when_total_at_least": 50,
+            "effort": "High"
+          }
+        ]
+      },
+      "why": "{count} artefact(s) were changed while the Default update set was current. The Default set is not intended to move between instances, so these changes exist in this instance and nowhere else. If this is a development instance, the work cannot be promoted without being recreated. If this is production, the changes were made directly in production and no other environment has them, which means the lower environments no longer represent what production runs and the next deployment from them will silently revert this work.",
+      "remediation": "List the affected artefacts and decide, per artefact, whether the change is wanted. For changes that should be kept, recreate them in a named update set in the development instance and promote them normally, or export the individual update records where recreation is impractical. For changes that should not have been made in this environment, back them out. Then close the process gap: confirm developers select a named update set before working, and make it visible in the development instance's landing page.",
+      "optimisation": "Track the count of Default-set changes per month as a delivery discipline metric. It falls quickly once it is visible, and a rising count is an early sign that release process is being bypassed under delivery pressure.",
+      "false_positives": [
+        "Personal or exploratory changes in a developer's own sub-production instance that were never intended for promotion",
+        "Changes to records that are excluded from update sets by design, such as data records and scheduled job run times",
+        "Emergency production fixes that were made in Default deliberately and have already been recreated in a tracked set upstream"
+      ],
+      "fixture_cases": [
+        {
+          "name": "change in Default set triggers",
+          "triggers": true,
+          "tables": {
+            "sys_update_xml_churn": [
+              {
+                "sys_id": "sys_script_a1",
+                "name": "sys_script_a1",
+                "target_name": "Incident autoclose",
+                "type": "Business Rule",
+                "update_set": "Default",
+                "update_count": 3,
+                "author_count": 1,
+                "authors": "jdoe",
+                "in_default_update_set": true,
+                "author_inactive": false,
+                "days_since_update": 12
+              }
+            ]
+          }
+        },
+        {
+          "name": "change in a named set does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_xml_churn": [
+              {
+                "sys_id": "sys_script_a2",
+                "name": "sys_script_a2",
+                "target_name": "Incident autoclose",
+                "type": "Business Rule",
+                "update_set": "REL-2026-08 Incident",
+                "update_count": 3,
+                "author_count": 1,
+                "authors": "jdoe",
+                "in_default_update_set": false,
+                "author_inactive": false,
+                "days_since_update": 12
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CHG-002",
+      "version": "0.1",
+      "category": "Change & Release Governance",
+      "title": "Artefacts rewritten repeatedly by successive changes",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Update sets: every customer change to a tracked artefact produces an update record in sys_update_xml, so the count of update records is the change history of that artefact",
+        "ServiceNow product documentation, Customer updates: the customer update record is what the upgrade engine compares against the vendor version to decide whether a record is skipped"
+      ],
+      "doc_topics": [
+        "customer update",
+        "sys_update_xml",
+        "update set"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_update_xml_churn",
+        "where": [
+          {
+            "field": "update_count",
+            "gte": 25
+          }
+        ],
+        "label_field": "target_name",
+        "evidence_template": "{type} '{label}' has {update_count} update record(s) from {author_count} author(s)",
+        "affected_area": "sys_update_xml (high-churn artefacts)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "High",
+        "assumptions": "Stabilising a high-churn artefact means understanding why it keeps changing, which is a design review rather than an edit."
+      },
+      "why": "{count} artefact(s) have been rewritten twenty-five or more times. Churn at that level is rarely healthy iteration: it usually means the artefact carries logic that belongs somewhere else, that several teams edit the same script because there is no shared component, or that a defect is being patched repeatedly rather than fixed. These are also the artefacts most likely to be skipped at upgrade, because heavy customisation is exactly what the upgrade engine protects and then hands back to the customer to reconcile.",
+      "remediation": "Take the top artefacts by update count and read their history. Where multiple teams edit the same script, extract the shared behaviour into a script include with a clear owner. Where the same defect keeps being patched, fix the underlying design instead. Where the artefact is a vendor record that has been customised repeatedly, check whether a supported extension point exists, because a heavily customised vendor record is a guaranteed upgrade cost.",
+      "optimisation": "Publish the change count per artefact alongside the release notes. Teams stop editing a shared script casually once its history is visible to everyone who depends on it.",
+      "false_positives": [
+        "Artefacts under active development during the scan window, where the churn is the project rather than the debt",
+        "Configuration records edited routinely as part of business operations, such as a notification whose content changes seasonally",
+        "Artefacts touched repeatedly by a bulk migration or a scripted refactor that produced many update records in one exercise"
+      ],
+      "fixture_cases": [
+        {
+          "name": "high-churn artefact triggers",
+          "triggers": true,
+          "tables": {
+            "sys_update_xml_churn": [
+              {
+                "sys_id": "sys_script_b1",
+                "name": "sys_script_b1",
+                "target_name": "Assignment routing",
+                "type": "Business Rule",
+                "update_set": "REL-2026-08",
+                "update_count": 61,
+                "author_count": 5,
+                "authors": "a, b, c, d, e",
+                "in_default_update_set": false,
+                "author_inactive": false,
+                "days_since_update": 4
+              }
+            ]
+          }
+        },
+        {
+          "name": "normal churn does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_xml_churn": [
+              {
+                "sys_id": "sys_script_b2",
+                "name": "sys_script_b2",
+                "target_name": "Assignment routing",
+                "type": "Business Rule",
+                "update_set": "REL-2026-08",
+                "update_count": 3,
+                "author_count": 1,
+                "authors": "a",
+                "in_default_update_set": false,
+                "author_inactive": false,
+                "days_since_update": 4
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CHG-003",
+      "version": "0.1",
+      "category": "Change & Release Governance",
+      "title": "Customisations whose only authors have left the organisation",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow product documentation, Update sets: the customer update record records the user who made each change, which is the platform's own record of authorship",
+        "ServiceNow product documentation, User administration: deactivation is the standard control applied when a person leaves, so an inactive author is a person no longer available to explain the change"
+      ],
+      "doc_topics": [
+        "customer update",
+        "sys_update_xml",
+        "update set"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_update_xml_churn",
+        "where": [
+          {
+            "field": "author_inactive",
+            "equals": true
+          },
+          {
+            "field": "update_count",
+            "gte": 2
+          }
+        ],
+        "label_field": "target_name",
+        "evidence_template": "{type} '{label}' was authored only by {authors}, who is no longer active",
+        "affected_area": "sys_update_xml (orphaned authorship)"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Certain",
+        "effort": "Medium",
+        "assumptions": "Assigning an owner is cheap; understanding an undocumented customisation well enough to own it is not. Estimate per artefact and weight by how much logic it carries.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 40
+          }
+        ]
+      },
+      "why": "{count} customised artefact(s) were authored only by people who are no longer active users. Nobody currently on the platform has ever changed them, so there is no one to ask why they behave the way they do. This is the material that turns a routine upgrade into an investigation: when one of these is skipped or breaks, the team is reading unfamiliar code under time pressure with no author to consult.",
+      "remediation": "Work through the list in order of how much logic each artefact carries. Assign a current owner per artefact, and have that owner add a header comment stating what it does and why it exists. Where an artefact turns out to be unused, retire it: an unused customisation with no owner is pure upgrade cost. Concentrate first on artefacts on high-volume tables and in the upgrade skip list, because those are the ones that will demand attention anyway.",
+      "optimisation": "Make ownership a field on the platform's own artefact register rather than something inferred from update history, so a leaver process can reassign it deliberately instead of leaving it to be discovered by a scan.",
+      "false_positives": [
+        "Artefacts authored by a service or integration account that has been deactivated but whose function is documented elsewhere",
+        "Instances cloned from production where user records have been scrambled or bulk-deactivated, making authorship unreliable",
+        "Artefacts authored by a contractor whose account was closed at the end of an engagement that produced full handover documentation"
+      ],
+      "fixture_cases": [
+        {
+          "name": "orphaned authorship triggers",
+          "triggers": true,
+          "tables": {
+            "sys_update_xml_churn": [
+              {
+                "sys_id": "sys_script_c1",
+                "name": "sys_script_c1",
+                "target_name": "SLA recalculation",
+                "type": "Business Rule",
+                "update_set": "REL-2024-02",
+                "update_count": 7,
+                "author_count": 1,
+                "authors": "former.dev",
+                "in_default_update_set": false,
+                "author_inactive": true,
+                "days_since_update": 900
+              }
+            ]
+          }
+        },
+        {
+          "name": "active authorship does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_xml_churn": [
+              {
+                "sys_id": "sys_script_c2",
+                "name": "sys_script_c2",
+                "target_name": "SLA recalculation",
+                "type": "Business Rule",
+                "update_set": "REL-2026-08",
+                "update_count": 7,
+                "author_count": 2,
+                "authors": "current.dev, other.dev",
+                "in_default_update_set": false,
+                "author_inactive": false,
+                "days_since_update": 10
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

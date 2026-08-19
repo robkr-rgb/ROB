@@ -1,0 +1,1072 @@
+{
+  "pack": "performance-codequality-v1",
+  "description": "Build wave 5: performance and code quality, the two domains the library had no category for. Derived from the HullCheck catalogue's PERF, SRV and CLT check families (robkr-rgb/qualityscan-servicenow, 266 checks, provenance mapped to CIS/NIST/ITIL and ServiceNow documentation), then re-derived against ServiceNow product documentation per D-015: the catalogue supplied the question each rule asks, and the detection, severity, remediation and false-positive analysis are ROB's own. Every rule reads script fields on tables the extractor already populates, so this wave needs no extraction delta.",
+  "rules": [
+    {
+      "id": "ROB-PERF-001",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "GlideRecord queries with no row limit",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow server-side scripting guidance: setLimit restricts the number of records a query returns, and a query written without one returns everything the encoded query matches",
+        "ServiceNow performance guidance: an unbounded query against a growing table is a defect that only appears once the table is large enough"
+      ],
+      "doc_topics": [
+        "GlideRecord setLimit",
+        "query performance",
+        "server side scripting"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bnew\\s+GlideRecord\\s*\\("
+        ],
+        "unless_patterns": [
+          "\\.setLimit\\s*\\(",
+          "\\.get\\s*\\(",
+          "\\.getRowCount\\s*\\(\\s*\\)\\s*[<>=]"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Server scripts (unbounded queries)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "Adding setLimit or a narrowing condition is a one-line change per query. Establishing the right limit is the thinking part.",
+        "conditional_modifiers": [
+          {
+            "modifier": "blast_radius",
+            "when_total_at_least": 20
+          }
+        ]
+      },
+      "why": "{count} active server script(s) construct a GlideRecord and never call setLimit or get(). Each one returns every row its query matches. That is harmless on a table with fifty rows and a production incident on a table with five million, which is why these are found after the instance has grown rather than when the code was written. The script does not fail; it gets slower until it times out and takes the transaction with it.",
+      "remediation": "For each script, establish the largest result set it can legitimately need. Add setLimit for scripts that process a bounded sample, and narrow the encoded query for scripts that should never have matched that many rows in the first place. Where a script genuinely must walk a whole table, move it to a scheduled job with a batch window rather than leaving it in a synchronous path.",
+      "optimisation": "Add 'every GlideRecord is bounded' to the code review checklist. It is a cheap habit and it removes an entire class of latent production defect.",
+      "false_positives": [
+        "Queries that are inherently bounded by a unique key, for example a lookup on sys_id where get() is not used but the encoded query can only match one record",
+        "Scheduled jobs deliberately processing a whole table in a maintenance window",
+        "Queries against small reference tables where the full result set is the intent"
+      ],
+      "fixture_cases": [
+        {
+          "name": "unbounded query triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p1",
+                "name": "Sweep tasks",
+                "active": true,
+                "oob": false,
+                "script": "var gr = new GlideRecord('task');\ngr.addQuery('active', true);\ngr.query();\nwhile (gr.next()) { gr.state = 3; gr.update(); }"
+              }
+            ]
+          }
+        },
+        {
+          "name": "setLimit does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p2",
+                "name": "Sweep tasks",
+                "active": true,
+                "oob": false,
+                "script": "var gr = new GlideRecord('task');\ngr.addQuery('active', true);\ngr.setLimit(100);\ngr.query();"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-PERF-002",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "GlideRecord query inside a loop",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow server-side scripting guidance: each GlideRecord query is a database round trip, so a query inside a loop multiplies round trips by the size of the outer result set",
+        "ServiceNow performance guidance: prefer a single query with an encoded query or a GlideAggregate over per-record lookups"
+      ],
+      "doc_topics": [
+        "GlideRecord query",
+        "nested query",
+        "GlideAggregate"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "while\\s*\\([^)]*\\.next\\s*\\(\\s*\\)[^)]*\\)[\\s\\S]{0,400}?new\\s+GlideRecord\\s*\\(",
+          "for\\s*\\([^)]*\\)[\\s\\S]{0,300}?new\\s+GlideRecord\\s*\\([\\s\\S]{0,200}?\\.query\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Server scripts (nested queries)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "High",
+        "assumptions": "Removing a nested query means restructuring the logic, usually into one joined query or a GlideAggregate. That is a rewrite of the method, not an edit."
+      },
+      "why": "{count} active server script(s) open a GlideRecord inside a loop. The cost is multiplicative: a hundred outer records become a hundred extra database round trips, a thousand become a thousand. This is the single most common cause of a script that worked in development and times out in production, because the outer result set in development was small enough to hide it.",
+      "remediation": "Restructure each one. Where the inner query is a lookup, collect the keys first and issue one query with an IN condition. Where the inner query is a count, use GlideAggregate rather than iterating rows. Where the inner query fetches a related record for display, consider whether a dot-walk on a reference field already gives you the value without a query at all. Prioritise scripts on high-volume tables, because those are the ones already costing time.",
+      "optimisation": "Publish the collect-then-query pattern as a snippet in the platform standard. Nested queries are usually written by someone who did not know the alternative, not by someone who weighed it.",
+      "false_positives": [
+        "An inner query bounded to a single record by a unique key, where the round trip is small and unavoidable",
+        "Loops over a fixed, tiny list such as a hard-coded array of three states",
+        "The regex sees a query textually inside a loop that is unreachable at runtime, for example inside an early-return branch"
+      ],
+      "fixture_cases": [
+        {
+          "name": "query inside a while loop triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "p3",
+                "name": "TaskUtils",
+                "active": true,
+                "oob": false,
+                "script": "while (task.next()) {\n  var u = new GlideRecord('sys_user');\n  u.get(task.assigned_to);\n}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "single query outside a loop does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "p4",
+                "name": "TaskUtils",
+                "active": true,
+                "oob": false,
+                "script": "var u = new GlideRecord('sys_user');\nu.addQuery('active', true);\nu.query();\nwhile (u.next()) { total++; }"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-PERF-003",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "Synchronous outbound calls in server scripts",
+      "tier": "T2",
+      "owner": "Integration team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow outbound REST guidance: execute() blocks the calling transaction until the remote system responds, while executeAsync() does not",
+        "ServiceNow business rule guidance: a business rule runs inside the user's transaction, so anything it waits on is time the user waits"
+      ],
+      "doc_topics": [
+        "outbound rest message",
+        "executeAsync",
+        "business rule performance"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\.execute\\s*\\(\\s*\\)",
+          "new\\s+sn_ws\\.RESTMessageV2[\\s\\S]{0,300}?\\.execute\\s*\\(\\s*\\)"
+        ],
+        "unless_patterns": [
+          "\\.executeAsync\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Server scripts (synchronous outbound)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Moving to executeAsync or an event-driven pattern changes the flow's error handling, so it needs a retest of the failure path, not just the happy path."
+      },
+      "why": "{count} active server script(s) make a synchronous outbound call. The transaction holds until the remote system answers, so the platform's responsiveness is now bounded by a system nobody here operates. When that system is slow, ServiceNow looks slow; when it hangs, the user's save hangs with it. This is one of the few defects that turns someone else's outage into your outage.",
+      "remediation": "Move each call off the user's transaction. Use executeAsync where the response is not needed to complete the current operation, or raise an event and handle the call in a scheduled job or flow. Where a response genuinely is needed inline, set an explicit short timeout and handle it, so a slow remote system degrades the feature rather than the instance. Start with calls in before and after business rules on high-volume tables.",
+      "optimisation": "Record the remote system on each integration so a slow endpoint can be attributed quickly. Half the time spent on these incidents is working out which call is the slow one.",
+      "false_positives": [
+        "Calls in scheduled jobs or background processing, where blocking is acceptable because no user is waiting",
+        "Calls that already set a short timeout and handle failure, where the risk is bounded by design",
+        "The pattern matching an unrelated method also named execute, for example a custom class with an execute entry point"
+      ],
+      "fixture_cases": [
+        {
+          "name": "synchronous execute triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p5",
+                "name": "Notify vendor",
+                "active": true,
+                "oob": false,
+                "script": "var r = new sn_ws.RESTMessageV2('Vendor', 'post');\nvar resp = r.execute();"
+              }
+            ]
+          }
+        },
+        {
+          "name": "executeAsync does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p6",
+                "name": "Notify vendor",
+                "active": true,
+                "oob": false,
+                "script": "var r = new sn_ws.RESTMessageV2('Vendor', 'post');\nr.executeAsync();"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-PERF-004",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "Display business rules running queries",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow business rule guidance: a display rule runs every time the form is loaded, before the record is presented to the user",
+        "ServiceNow performance guidance: work in a display rule is on the critical path of every form load for that table"
+      ],
+      "doc_topics": [
+        "display business rule",
+        "form load performance",
+        "g_scratchpad"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script"
+        ],
+        "field": "script",
+        "patterns": [
+          "new\\s+GlideRecord\\s*\\(",
+          "\\bGlideAggregate\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "when",
+            "equals": "display"
+          }
+        ],
+        "affected_area": "sys_script (display rules)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "Medium",
+        "assumptions": "The fix is usually to move the work off the form load, which means deciding what the form actually needs. Estimate per rule."
+      },
+      "why": "{count} active display business rule(s) run a query. Display rules execute on every single form load for their table, so the cost is paid by every user opening every record, whether or not the resulting value is used. Nobody experiences this as a defect: they experience it as the platform being slow, which is much harder to attribute and therefore much harder to get fixed.",
+      "remediation": "For each rule, check whether the value it computes is actually read by a client script or UI policy. Delete the ones whose scratchpad values nothing consumes. For the rest, narrow the query to the minimum, add a condition so the rule only runs on the records that need it, or move the work to an asynchronous rule and store the result on the record. Measure the form load before and after, because this is one of the few changes where the improvement is directly observable.",
+      "optimisation": "Set a rule in the platform standard that display rules may read but never aggregate. It is a simple bar and it keeps form load predictable as the instance grows.",
+      "false_positives": [
+        "A display rule with a tight condition so it runs on a small minority of records",
+        "A single get() by sys_id, which is a cheap round trip rather than a query",
+        "Rules on low-traffic tables where form load volume is negligible"
+      ],
+      "fixture_cases": [
+        {
+          "name": "display rule with a query triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p7",
+                "name": "Load approvals",
+                "active": true,
+                "when": "display",
+                "collection": "change_request",
+                "oob": false,
+                "script": "var a = new GlideRecord('sysapproval_approver');\na.addQuery('document_id', current.sys_id);\na.query();\ng_scratchpad.count = a.getRowCount();"
+              }
+            ]
+          }
+        },
+        {
+          "name": "before rule with a query does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p8",
+                "name": "Load approvals",
+                "active": true,
+                "when": "before",
+                "collection": "change_request",
+                "oob": false,
+                "script": "var a = new GlideRecord('sysapproval_approver');\na.query();"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-PERF-005",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "Bulk delete or update called from scripts",
+      "tier": "T1",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow server-side scripting guidance: deleteMultiple and updateMultiple act on every record matching the current query in a single operation",
+        "ServiceNow data management guidance: bulk operations bypass per-record business rules in some contexts and cannot be undone from the UI"
+      ],
+      "doc_topics": [
+        "deleteMultiple",
+        "updateMultiple",
+        "bulk operation"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\.deleteMultiple\\s*\\(",
+          "\\.updateMultiple\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Server scripts (bulk operations)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Reviewing a bulk operation means proving the query cannot widen. That is a reading exercise plus a test, not an edit."
+      },
+      "why": "{count} active server script(s) call deleteMultiple or updateMultiple. These act on everything the current query matches, so the blast radius is set entirely by a query written somewhere above the call. A condition that silently stops matching, a variable that arrives empty, or a refactor that drops an addQuery turns a targeted cleanup into a whole-table operation with no confirmation step and no undo.",
+      "remediation": "For each call, read the query that precedes it and establish what happens if any condition evaluates empty. Add a guard that refuses to run when the query is unbounded, and log the row count before acting. Where the operation is genuinely bulk maintenance, move it to a scheduled job with a recorded row count and a dry-run mode. Treat any bulk delete on a task or CMDB table as requiring a second reviewer.",
+      "optimisation": "Give the platform a shared helper for guarded bulk operations, so the row-count check and the logging are written once rather than remembered fourteen times.",
+      "false_positives": [
+        "Bulk operations on scratch or staging tables the instance owns entirely",
+        "Calls inside a documented data-migration script retained for reference and not scheduled",
+        "Operations already guarded by an explicit count check the pattern cannot see"
+      ],
+      "fixture_cases": [
+        {
+          "name": "deleteMultiple triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "p9",
+                "name": "Cleanup",
+                "active": true,
+                "oob": false,
+                "script": "var gr = new GlideRecord('u_staging');\ngr.addQuery('processed', true);\ngr.deleteMultiple();"
+              }
+            ]
+          }
+        },
+        {
+          "name": "per-record delete does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "p10",
+                "name": "Cleanup",
+                "active": true,
+                "oob": false,
+                "script": "while (gr.next()) { gr.deleteRecord(); }"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-PERF-006",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "Row iteration used to count records",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow server-side scripting guidance: GlideAggregate performs a COUNT in the database, while iterating a GlideRecord fetches every row to the application server first",
+        "ServiceNow performance guidance: counting by iteration transfers data that is then discarded"
+      ],
+      "doc_topics": [
+        "GlideAggregate",
+        "getRowCount",
+        "count query"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "while\\s*\\([^)]*\\.next\\s*\\(\\s*\\)\\s*\\)\\s*\\{\\s*[A-Za-z_$][\\w$]*\\s*\\+\\+\\s*;?\\s*\\}"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Server scripts (counting by iteration)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Replacing the loop with GlideAggregate is a small, local rewrite with an obvious equivalent."
+      },
+      "why": "{count} active server script(s) count records by looping over them and incrementing a variable. Every row is fetched from the database, marshalled into the application server, and thrown away. On a small table the waste is invisible; on a large one the script is doing megabytes of work to produce a single integer.",
+      "remediation": "Replace each loop with GlideAggregate using the COUNT aggregate, or with getRowCount where the result set is already needed for another reason. The rewrite is mechanical and the behaviour is identical, so this is one of the few performance fixes that carries almost no risk.",
+      "optimisation": "Add GlideAggregate to the platform's snippet library. This pattern persists mainly because the loop is the first thing that comes to mind.",
+      "false_positives": [
+        "Loops that increment a counter while also doing other work the pattern cannot see on the same line",
+        "Counting a filtered subset that cannot be expressed as an encoded query",
+        "Deliberately iterating a small, fixed result set where clarity beats the micro-optimisation"
+      ],
+      "fixture_cases": [
+        {
+          "name": "counting loop triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "p11",
+                "name": "Stats",
+                "active": true,
+                "oob": false,
+                "script": "var n = 0;\nwhile (gr.next()) { n++; }\nreturn n;"
+              }
+            ]
+          }
+        },
+        {
+          "name": "GlideAggregate does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "p12",
+                "name": "Stats",
+                "active": true,
+                "oob": false,
+                "script": "var ga = new GlideAggregate('incident');\nga.addAggregate('COUNT');\nga.query();"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-PERF-007",
+      "version": "0.1",
+      "category": "Performance",
+      "title": "Server-side debug logging left enabled",
+      "tier": "T1",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow logging guidance: gs.log and gs.info write to the system log on every execution, and the system log is one of the highest-volume tables in an instance",
+        "ServiceNow scripting guidance: debug output belongs behind a property or a debug flag rather than in the execution path"
+      ],
+      "doc_topics": [
+        "gs.log",
+        "system log",
+        "script logging"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bgs\\.log\\s*\\(",
+          "\\bgs\\.print\\s*\\(",
+          "\\bgs\\.debug\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Server scripts (debug logging)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Removing a log line or putting it behind a property is a one-line change per occurrence.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 25
+          }
+        ]
+      },
+      "why": "{count} active server script(s) write to the system log unconditionally. On a script that runs per record on a high-volume table, this generates a log row for every record processed, which fills the largest table in the instance with output nobody reads. It also slows the script itself, and it is the reason log retention conversations usually start with 'why is syslog so big'.",
+      "remediation": "Remove log lines that were added for a debugging session that has ended. Put the rest behind a system property or a script debug flag so the output can be turned on when it is needed and stays off when it is not. Where the log line records something genuinely operational, use an event or a purpose-built table rather than the system log, so it survives log rotation and can be reported on.",
+      "optimisation": "Agree a logging convention: what gets logged, at what level, and behind which property. Without one, every developer invents their own and the log becomes unreadable.",
+      "false_positives": [
+        "Deliberate operational logging of errors, which belongs in the log and should stay",
+        "Scripts that run rarely, where a log line per execution is negligible",
+        "Logging already guarded by a property check the pattern cannot see on the same line"
+      ],
+      "fixture_cases": [
+        {
+          "name": "unconditional gs.log triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p13",
+                "name": "Route task",
+                "active": true,
+                "oob": false,
+                "script": "gs.log('routing ' + current.number);\ncurrent.assignment_group = grp;"
+              }
+            ]
+          }
+        },
+        {
+          "name": "no logging does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "p14",
+                "name": "Route task",
+                "active": true,
+                "oob": false,
+                "script": "current.assignment_group = grp;"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CODE-001",
+      "version": "0.1",
+      "category": "Code Quality",
+      "title": "current.update() called inside a business rule",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow business rule guidance: in a before rule the record is saved after the rule completes, so setting a field is sufficient and calling update() is not required",
+        "ServiceNow business rule guidance: calling update() on current inside a rule that runs on the same record can re-enter the rule engine"
+      ],
+      "doc_topics": [
+        "business rule current.update",
+        "recursive business rule",
+        "before business rule"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bcurrent\\.update\\s*\\(\\s*\\)"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "sys_script (current.update)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "In a before rule the call is simply deleted. In an after rule it needs a moment's thought about what was intended."
+      },
+      "why": "{count} active business rule(s) call current.update(). In a before rule this is redundant, because the platform saves the record when the rule finishes. In an after rule it writes the record a second time and can re-enter the rule engine on the same record, which is how a single save turns into a loop. The symptom is not a clean failure: it is a transaction that takes seconds instead of milliseconds, or a journal field with the same entry four times.",
+      "remediation": "In before rules, delete the call and set the field. In after rules, establish what the second write was for: if it is updating a different record, use a separate GlideRecord rather than current; if it is genuinely updating the same record after the fact, move the logic into the before rule where it belongs. Add a recursion guard where a rule must write to its own table.",
+      "optimisation": "Make 'no current.update() in a before rule' a review check. It is unambiguous, mechanical to spot, and the fix is a deletion.",
+      "false_positives": [
+        "An async rule where current.update() is the intended way to persist a change computed after the original transaction",
+        "Rules that update current inside a clearly guarded branch that cannot re-enter",
+        "A comment or string containing the text, where comment stripping did not remove it"
+      ],
+      "fixture_cases": [
+        {
+          "name": "current.update in a business rule triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "c1",
+                "name": "Set priority",
+                "active": true,
+                "when": "before",
+                "collection": "incident",
+                "oob": false,
+                "script": "current.priority = 1;\ncurrent.update();"
+              }
+            ]
+          }
+        },
+        {
+          "name": "field assignment alone does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "c2",
+                "name": "Set priority",
+                "active": true,
+                "when": "before",
+                "collection": "incident",
+                "oob": false,
+                "script": "current.priority = 1;"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CODE-002",
+      "version": "0.1",
+      "category": "Code Quality",
+      "title": "Empty catch blocks swallowing errors",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow scripting guidance: an error that is caught and discarded leaves no record that the operation failed",
+        "ServiceNow troubleshooting guidance: the system log is the primary evidence when a scripted operation does not do what was expected"
+      ],
+      "doc_topics": [
+        "error handling",
+        "try catch",
+        "script exception"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include",
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "catch\\s*\\([^)]*\\)\\s*\\{\\s*\\}"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "Scripts (empty catch blocks)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Adding a log line and a decision about what to do on failure is a small change, made once per catch block."
+      },
+      "why": "{count} active script(s) catch an exception and do nothing with it. The operation fails, the failure is discarded, and the script continues as though it succeeded. This is worse than an unhandled error: an unhandled error produces a log entry someone can find, whereas a swallowed one produces a record that is quietly missing a value, and the investigation starts weeks later from the wrong end.",
+      "remediation": "For each block, decide what failure means. If the operation is optional, log at info level and say why it is safe to continue. If it is not optional, log the error and stop, or set a flag the caller can check. Never leave the block empty: a comment explaining that failure is genuinely acceptable is the minimum, because the next reader cannot tell the difference between a deliberate choice and an oversight.",
+      "optimisation": "Add an empty-catch check to whatever static analysis the team already runs on other codebases. It is the cheapest possible lint rule and it catches a real class of defect.",
+      "false_positives": [
+        "Blocks where failure is genuinely irrelevant and the author knew it, for example a best-effort cache warm",
+        "Catch blocks whose only statement is on the same line as the brace and was stripped by comment handling",
+        "Generated or vendor code that the customer does not maintain"
+      ],
+      "fixture_cases": [
+        {
+          "name": "empty catch triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "c3",
+                "name": "SyncUtil",
+                "active": true,
+                "oob": false,
+                "script": "try { doSync(); } catch (e) {}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "handled catch does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "c4",
+                "name": "SyncUtil",
+                "active": true,
+                "oob": false,
+                "script": "try { doSync(); } catch (e) { gs.error('sync failed: ' + e); }"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CODE-003",
+      "version": "0.1",
+      "category": "Code Quality",
+      "title": "Business rules writing to their own table without a recursion guard",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow business rule guidance: a rule that updates a record on the table it runs on can trigger itself again",
+        "ServiceNow scripting guidance: setWorkflow(false) and an explicit state check are the established ways to prevent re-entry"
+      ],
+      "doc_topics": [
+        "recursive business rule",
+        "setWorkflow",
+        "business rule order"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\.update\\s*\\(\\s*\\)"
+        ],
+        "unless_patterns": [
+          "setWorkflow\\s*\\(\\s*false\\s*\\)",
+          "autoSysFields\\s*\\(\\s*false\\s*\\)"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "when",
+            "in": [
+              "after",
+              "async"
+            ]
+          }
+        ],
+        "affected_area": "sys_script (after/async writes)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Adding a guard is small; proving which rules can re-enter each other is the work, and it needs the whole rule set for the table."
+      },
+      "why": "{count} active after or async business rule(s) call update() without setWorkflow(false) or an equivalent guard. If any of those writes touches the same table the rule runs on, the rule engine re-enters and the rules run again. It rarely loops forever, because something eventually stops matching, but it does multiply the work of every save on that table by an amount nobody has measured.",
+      "remediation": "For each rule, establish whether the record it updates is on the same table. Where it is, add setWorkflow(false) to the write and confirm nothing downstream depended on those rules firing. Where the write is to another table, document that in the rule description so the next reviewer does not have to work it out again. Review the whole rule set per table rather than rule by rule, because re-entry is a property of the set.",
+      "optimisation": "Record the order and the intent of each rule on high-volume tables in one place. Re-entry problems are almost always found by reading one rule at a time and missing the interaction.",
+      "false_positives": [
+        "Rules updating a different table entirely, where re-entry is not possible",
+        "Rules whose guard is a condition on the record rather than setWorkflow, which this pattern cannot see",
+        "Async rules that deliberately re-trigger a downstream rule as part of the design"
+      ],
+      "fixture_cases": [
+        {
+          "name": "unguarded after-rule write triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "c5",
+                "name": "Roll up",
+                "active": true,
+                "when": "after",
+                "collection": "incident",
+                "oob": false,
+                "script": "var p = new GlideRecord('incident');\np.get(current.parent);\np.u_total = 1;\np.update();"
+              }
+            ]
+          }
+        },
+        {
+          "name": "guarded write does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "c6",
+                "name": "Roll up",
+                "active": true,
+                "when": "after",
+                "collection": "incident",
+                "oob": false,
+                "script": "p.setWorkflow(false);\np.update();"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CODE-004",
+      "version": "0.1",
+      "category": "Code Quality",
+      "title": "Security decisions made only in client scripts",
+      "tier": "T1",
+      "owner": "Security team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow security guidance: client scripts run in the browser and can be bypassed, so they are a usability control and never an access control",
+        "ServiceNow access control guidance: read and write restrictions belong in ACLs, which the server enforces regardless of the client"
+      ],
+      "doc_topics": [
+        "client script security",
+        "access control list",
+        "server side validation"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "g_user\\.hasRole\\s*\\(",
+          "g_user\\.hasRoleExactly\\s*\\(",
+          "g_form\\.setReadOnly\\s*\\([^)]*hasRole",
+          "g_form\\.setDisplay\\s*\\([^)]*hasRole"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "sys_script_client (client-side role checks)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Writing the equivalent ACL is the work, plus regression testing every persona that touches the form."
+      },
+      "why": "{count} active client script(s) branch on the user's roles. Anything decided in the browser can be changed in the browser: a hidden field is still returned by the API, a read-only field is still writable through the Table API, and a role check in JavaScript is advisory. If these checks are the only thing standing between a user and a field, the control does not exist. It only looks like it does, which is worse than having no control at all, because nobody goes looking.",
+      "remediation": "For each script, find out whether an ACL enforces the same restriction server-side. Where one does, the client script is a usability improvement and can stay as is. Where none does, write the ACL first, test it with a user who has the role and one who does not, and only then decide whether the client script is still worth keeping. Treat any field holding personal, financial or security data as needing the ACL regardless.",
+      "optimisation": "Make 'what enforces this on the server?' a standing question at design review whenever a client script mentions a role. It costs one sentence and prevents the whole class.",
+      "false_positives": [
+        "Purely cosmetic role branching, for example showing a help message to fulfillers, where nothing is being protected",
+        "Client scripts that mirror an ACL deliberately, so the user sees the restriction before submitting rather than after",
+        "Scripts on forms whose underlying table is already restricted at the table level"
+      ],
+      "fixture_cases": [
+        {
+          "name": "client-side role check triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "c7",
+                "name": "Lock cost field",
+                "active": true,
+                "table": "incident",
+                "oob": false,
+                "script": "if (!g_user.hasRole('finance')) { g_form.setReadOnly('u_cost', true); }"
+              }
+            ]
+          }
+        },
+        {
+          "name": "no role branching does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "c8",
+                "name": "Lock cost field",
+                "active": true,
+                "table": "incident",
+                "oob": false,
+                "script": "g_form.setMandatory('short_description', true);"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-CODE-005",
+      "version": "0.1",
+      "category": "Code Quality",
+      "title": "Client scripts doing work a UI policy should do",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow form configuration guidance: UI policies apply mandatory, read-only and visible states declaratively and are evaluated before client scripts",
+        "ServiceNow upgrade guidance: declarative configuration survives upgrades more predictably than scripted equivalents"
+      ],
+      "doc_topics": [
+        "UI policy",
+        "client script",
+        "form configuration"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "g_form\\.setMandatory\\s*\\(",
+          "g_form\\.setReadOnly\\s*\\(",
+          "g_form\\.setVisible\\s*\\(",
+          "g_form\\.setDisplay\\s*\\("
+        ],
+        "unless_patterns": [
+          "g_user\\.hasRole\\s*\\(",
+          "GlideAjax",
+          "getReference"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "affected_area": "sys_script_client (declarative candidates)"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Likely",
+        "effort": "Medium",
+        "assumptions": "Each conversion is a small piece of configuration plus a form test. The volume is what makes it a project rather than a task.",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 20
+          }
+        ]
+      },
+      "why": "{count} active client script(s) only set fields mandatory, read-only or visible. That is exactly what a UI policy does, declaratively, with a condition anyone can read on the form and without a script to maintain. Scripted equivalents are harder to review, execute later in the form lifecycle, and are invisible to anyone looking at the UI policy list to understand why a field behaves the way it does.",
+      "remediation": "Convert them to UI policies, starting with the tables that have the most. Each conversion is a condition plus a set of actions, and the client script is then deleted rather than left inactive. Where a script does something a UI policy cannot express, keep the script and note why in its description, so the next reviewer does not re-open the question.",
+      "optimisation": "Add 'a UI policy unless it cannot be' to the form configuration standard. The conversion backlog stops growing the moment the default changes.",
+      "false_positives": [
+        "Scripts whose condition depends on a server lookup, which a UI policy cannot do",
+        "Scripts combining field state with other behaviour, where only part is declarative",
+        "onSubmit scripts, where the timing differs from a UI policy in a way that matters"
+      ],
+      "fixture_cases": [
+        {
+          "name": "declarative-only client script triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "c9",
+                "name": "Make cause mandatory",
+                "active": true,
+                "table": "problem",
+                "oob": false,
+                "script": "function onChange(control, oldValue, newValue, isLoading) {\n  g_form.setMandatory('cause_notes', newValue == 'closed');\n}"
+              }
+            ]
+          }
+        },
+        {
+          "name": "script with a server lookup does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "c10",
+                "name": "Lookup owner",
+                "active": true,
+                "table": "problem",
+                "oob": false,
+                "script": "var ga = new GlideAjax('Util');\nga.getXMLAnswer(function(a){ g_form.setReadOnly('owner', a == 'y'); });"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

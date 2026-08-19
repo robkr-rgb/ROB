@@ -1,0 +1,194 @@
+{
+  "ROB-CHG-001": {
+    "logic_hash": "7e592079cd6d0b64",
+    "version": "0.1"
+  },
+  "ROB-CHG-002": {
+    "logic_hash": "d2123cfca117e07d",
+    "version": "0.1"
+  },
+  "ROB-CHG-003": {
+    "logic_hash": "003fb0721e41f70e",
+    "version": "0.1"
+  },
+  "ROB-CODE-001": {
+    "logic_hash": "e54168f678197ae1",
+    "version": "0.1"
+  },
+  "ROB-CODE-002": {
+    "logic_hash": "a78ee3817cda0f43",
+    "version": "0.1"
+  },
+  "ROB-CODE-003": {
+    "logic_hash": "a7e1ce2dc6b5f04c",
+    "version": "0.1"
+  },
+  "ROB-CODE-004": {
+    "logic_hash": "394eef50d17ae165",
+    "version": "0.1"
+  },
+  "ROB-CODE-005": {
+    "logic_hash": "b21fecbb13967b17",
+    "version": "0.1"
+  },
+  "ROB-DM-001": {
+    "logic_hash": "48401a2c4a15fb7e",
+    "version": "0.1"
+  },
+  "ROB-DM-002": {
+    "logic_hash": "c82b4e3c7d31a468",
+    "version": "0.1"
+  },
+  "ROB-DM-003": {
+    "logic_hash": "3d64b45e0ad4b6f5",
+    "version": "0.1"
+  },
+  "ROB-GOV-001": {
+    "logic_hash": "f8937ae78cdb6c2b",
+    "version": "0.1"
+  },
+  "ROB-GOV-002": {
+    "logic_hash": "26d07c454c0eebf8",
+    "version": "0.1"
+  },
+  "ROB-GOV-003": {
+    "logic_hash": "9c844895d4a2618c",
+    "version": "0.1"
+  },
+  "ROB-INT-001": {
+    "logic_hash": "73470940be1d2193",
+    "version": "0.1"
+  },
+  "ROB-INT-002": {
+    "logic_hash": "b5fd3578121763a3",
+    "version": "0.1"
+  },
+  "ROB-INT-003": {
+    "logic_hash": "2d58400ed5315fe4",
+    "version": "0.1"
+  },
+  "ROB-OPS-001": {
+    "logic_hash": "6f0b292e57f77612",
+    "version": "0.1"
+  },
+  "ROB-OPS-002": {
+    "logic_hash": "cc731efcf32d9fa9",
+    "version": "0.1"
+  },
+  "ROB-OPS-003": {
+    "logic_hash": "2fbc8a702ec9f0f2",
+    "version": "0.1"
+  },
+  "ROB-OPS-004": {
+    "logic_hash": "02c656cd45e194d4",
+    "version": "0.1"
+  },
+  "ROB-PERF-001": {
+    "logic_hash": "50e84ee6d991c0c7",
+    "version": "0.1"
+  },
+  "ROB-PERF-002": {
+    "logic_hash": "25e189120cca4890",
+    "version": "0.1"
+  },
+  "ROB-PERF-003": {
+    "logic_hash": "942f3e5e9ac5bf15",
+    "version": "0.1"
+  },
+  "ROB-PERF-004": {
+    "logic_hash": "57f83bd155ac26a0",
+    "version": "0.1"
+  },
+  "ROB-PERF-005": {
+    "logic_hash": "63b272b5e2fc78db",
+    "version": "0.1"
+  },
+  "ROB-PERF-006": {
+    "logic_hash": "8dcf6cab1e7179fd",
+    "version": "0.1"
+  },
+  "ROB-PERF-007": {
+    "logic_hash": "c03e2c6f610388c7",
+    "version": "0.1"
+  },
+  "ROB-SCOPE-001": {
+    "logic_hash": "4c7f2e6e0b4b1c9a",
+    "version": "0.1"
+  },
+  "ROB-SCOPE-002": {
+    "logic_hash": "ba95f67d85790d0f",
+    "version": "0.1"
+  },
+  "ROB-SCOPE-003": {
+    "logic_hash": "92536c30e8543b2e",
+    "version": "0.1"
+  },
+  "ROB-SCOPE-004": {
+    "logic_hash": "f5a46fd8d15759bf",
+    "version": "0.1"
+  },
+  "ROB-SEC-004": {
+    "logic_hash": "cd0308b9db8ea286",
+    "version": "0.1"
+  },
+  "ROB-SEC-005": {
+    "logic_hash": "cf230c9b651014af",
+    "version": "0.1"
+  },
+  "ROB-SEC-006": {
+    "logic_hash": "f115352ec91f3747",
+    "version": "0.1"
+  },
+  "ROB-SEC-007": {
+    "logic_hash": "0a2d4a56cf430f0a",
+    "version": "0.1"
+  },
+  "ROB-SEC-008": {
+    "logic_hash": "892a5512b95ee424",
+    "version": "0.1"
+  },
+  "ROB-TD-004": {
+    "logic_hash": "705f78eeefdc437c",
+    "version": "0.1"
+  },
+  "ROB-TD-005": {
+    "logic_hash": "b4ef165182aae4c8",
+    "version": "0.1"
+  },
+  "ROB-TD-006": {
+    "logic_hash": "dfcd4c9e69ea3ed4",
+    "version": "0.1"
+  },
+  "ROB-TD-007": {
+    "logic_hash": "41bf16b638ad555e",
+    "version": "0.1"
+  },
+  "ROB-TD-008": {
+    "logic_hash": "10020aa62c0616d8",
+    "version": "0.1"
+  },
+  "ROB-TD-010": {
+    "logic_hash": "7e41f2ffb3a3e522",
+    "version": "0.1"
+  },
+  "ROB-TD-011": {
+    "logic_hash": "f22e9126666850f5",
+    "version": "0.1"
+  },
+  "ROB-TD-012": {
+    "logic_hash": "079d045c23970eeb",
+    "version": "0.1"
+  },
+  "ROB-TD-013": {
+    "logic_hash": "b00264f1b58e5153",
+    "version": "0.1"
+  },
+  "ROB-TD-014": {
+    "logic_hash": "9bda57316fe41167",
+    "version": "0.1"
+  },
+  "ROB-TD-015": {
+    "logic_hash": "9c944ec177a3f649",
+    "version": "0.1"
+  }
+}

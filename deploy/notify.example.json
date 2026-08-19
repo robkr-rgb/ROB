@@ -1,0 +1,22 @@
+{
+  "_comment": "Merge the notify block into rob_home/web_config.json. Recipients per the ServiceNow team: product owner, platform owner, developers, configuration and asset manager.",
+  "notify": {
+    "email": {
+      "host": "smtp.example.com",
+      "port": 587,
+      "starttls": true,
+      "user": "rob@example.com",
+      "password": "app-password-here",
+      "from": "ROB <rob@example.com>",
+      "to": [
+        "product.owner@example.com",
+        "platform.owner@example.com",
+        "servicenow-devs@example.com",
+        "cmdb.asset.manager@example.com"
+      ]
+    },
+    "webhook": {
+      "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ"
+    }
+  }
+}

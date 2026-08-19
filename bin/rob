@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# ROB launcher. Run it from anywhere: it finds its own repo.
+#
+# The whole point is that `python3 -m rob ...` only works from the repo root,
+# which is a trap you fall into once a week. This script resolves the repo from
+# its own location, so the command works from any directory.
+set -euo pipefail
+
+# Resolve this script through symlinks, so /usr/local/bin/rob -> here works.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+PY="${ROB_PYTHON:-python3}"
+command -v "$PY" >/dev/null || { echo "rob: $PY not found. Install Python 3.10+ or set ROB_PYTHON." >&2; exit 1; }
+"$PY" - <<'PYCHECK' || { echo "rob: needs Python 3.10 or newer." >&2; exit 1; }
+import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)
+PYCHECK
+
+# Default the workspace so 'rob serve' and 'rob mcp' share one by default,
+# instead of each caller having to remember --home.
+export ROB_HOME_DEFAULT="${ROB_HOME:-$REPO/rob_home}"
+
+cd "$REPO"
+exec "$PY" -m rob "$@"

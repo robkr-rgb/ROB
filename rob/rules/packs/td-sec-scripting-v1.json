@@ -1,0 +1,758 @@
+{
+  "pack": "td-sec-scripting-v1",
+  "description": "Script-content anti-patterns (capability class B, build wave 2 of scanner/rule-catalogue-triage.md). Every rule is re-derived from a primary source per D-015; the triaged catalogue was used only to decide which problems were worth checking. Scoped deliberately to the three script tables the extractor already reads (sys_script, sys_script_include, sys_script_client) - rules whose data is not extracted are not shipped.",
+  "rules": [
+    {
+      "id": "ROB-TD-004",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Direct SQL access in server scripts",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow server-side scripting guidance: data access is via GlideRecord and GlideAggregate; direct SQL is not a supported platform API",
+        "ServiceNow upgrade mechanics: unsupported APIs carry no compatibility guarantee across families"
+      ],
+      "doc_topics": [
+        "GlideRecord GlideAggregate",
+        "server side scripting",
+        "database query API"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bgs\\.sql\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "Server scripts (custom)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "effort": "Medium",
+        "assumptions": "Normal change; each call needs a GlideRecord/GlideAggregate rewrite plus a sub-production data comparison",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 10
+          }
+        ]
+      },
+      "why": "{count} active custom server artefact(s) call gs.sql directly ({hits} call site(s)). Direct SQL bypasses ACLs, domain separation and the platform query layer, and carries no upgrade compatibility guarantee, so it can break silently on a family upgrade.",
+      "remediation": "Rewrite each call as GlideRecord or GlideAggregate. Where the SQL exists for aggregate performance, use GlideAggregate with addAggregate rather than a raw count query. Compare row counts against the original query in sub-production before promoting.",
+      "optimisation": "Add gs.sql to the peer-review block list so new occurrences cannot enter the instance.",
+      "false_positives": [
+        "The literal string 'gs.sql' inside a block comment (line comments are stripped, block comments deliberately are not)",
+        "Logging or documentation strings that name the API without calling it",
+        "Vendor-shipped artefacts, excluded by the OOB discrimination service"
+      ],
+      "fixture_cases": [
+        {
+          "name": "active custom script include calling gs.sql triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "a1",
+                "name": "LegacyReportUtil",
+                "active": true,
+                "oob": false,
+                "script": "var rs = gs.sql('select count(*) from incident');"
+              }
+            ]
+          }
+        },
+        {
+          "name": "occurrence in a line comment does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "a2",
+                "name": "DocumentedUtil",
+                "active": true,
+                "oob": false,
+                "script": "// do not use gs.sql( here\nvar gr = new GlideRecord('incident');"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vendor-shipped artefact does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "a3",
+                "name": "OOBUtil",
+                "active": true,
+                "oob": true,
+                "script": "var rs = gs.sql('select 1');"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-005",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Instance-wide cache flush called from scripts",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow platform performance guidance: cache flush invalidates instance-wide caches and forces every node to rebuild them",
+        "ServiceNow support guidance on cache management during business hours"
+      ],
+      "doc_topics": [
+        "cache flush",
+        "instance performance",
+        "system cache"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bgs\\.cacheFlush\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "Server scripts (custom)"
+      },
+      "severity": {
+        "impact": "Major",
+        "likelihood": "Likely",
+        "modifiers": [
+          "blast_radius"
+        ],
+        "effort": "Medium",
+        "assumptions": "Normal change; requires understanding why the cache flush was added before removing it"
+      },
+      "why": "{count} active custom server artefact(s) call gs.cacheFlush ({hits} call site(s)). A cache flush is instance-wide: every node discards its caches and rebuilds them under live load, which degrades response times for all users, not only the transaction that triggered it.",
+      "remediation": "Remove the call and address the underlying cause. Where a script mutates configuration records that require a flush, move that work to a scheduled maintenance job outside business hours rather than flushing inline on a user transaction.",
+      "optimisation": "Add gs.cacheFlush to the peer-review block list and document the approved maintenance-window pattern for configuration mutation.",
+      "false_positives": [
+        "Deliberate use inside an admin-only maintenance script that is executed manually during a window; verify the calling context before acting",
+        "Occurrence inside a block comment",
+        "Vendor-shipped artefacts, excluded by the OOB discrimination service"
+      ],
+      "fixture_cases": [
+        {
+          "name": "business rule calling cacheFlush triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "b1",
+                "name": "RefreshOnUpdate",
+                "active": true,
+                "oob": false,
+                "script": "gs.cacheFlush();"
+              }
+            ]
+          }
+        },
+        {
+          "name": "clean script does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "b2",
+                "name": "CleanRule",
+                "active": true,
+                "oob": false,
+                "script": "current.setValue('state', 3);"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-006",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Debug console output left in client scripts",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow client scripting guidance: remove debugging output before promoting an artefact",
+        "OWASP guidance on information exposure through client-side debug output"
+      ],
+      "doc_topics": [
+        "client script debugging",
+        "browser console logging",
+        "script promotion"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bconsole\\.log\\s*\\("
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "sys_script_client (instance-wide)"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Standard change; per-script line removal, no functional testing beyond a form load",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 25
+          }
+        ]
+      },
+      "why": "{count} active client script(s) write to the browser console ({hits} call site(s)). Left-in debug output signals that artefacts reached production without a promotion check, and can disclose record data, user identifiers or internal logic to anyone with developer tools open.",
+      "remediation": "Remove each console.log call. Where the output is genuinely needed for support, replace it with a guarded diagnostic behind a system property that defaults to off.",
+      "optimisation": "Add a promotion check that rejects client-side artefacts containing console output, so the class of finding cannot recur.",
+      "false_positives": [
+        "Occurrence inside a block comment",
+        "A deliberately retained diagnostic in a non-production instance; scope the finding to the environment before acting",
+        "String literals mentioning console.log in help or documentation text"
+      ],
+      "fixture_cases": [
+        {
+          "name": "client script with console.log triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "c1",
+                "name": "onLoadDebug",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "console.log('loaded', g_form.getValue('number'));"
+              }
+            ]
+          }
+        },
+        {
+          "name": "commented-out console.log does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "c2",
+                "name": "onLoadClean",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "// console.log('x');\ng_form.setMandatory('short_description', true);"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-007",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Dot-walking to sys_id on a reference field",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow scripting guidance on dot-walking: a reference field already holds the referenced record's sys_id, so walking to .sys_id forces an avoidable record load"
+      ],
+      "doc_topics": [
+        "dot-walking reference field",
+        "getValue reference",
+        "GlideRecord dot walk"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include",
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\.[a-zA-Z_][a-zA-Z0-9_]*\\.sys_id\\b"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "Scripts (custom)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Standard change; per-occurrence edit, behaviour is equivalent",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 30
+          }
+        ]
+      },
+      "why": "{count} active custom artefact(s) dot-walk through a reference field to reach .sys_id ({hits} occurrence(s)). Each occurrence loads the referenced record from the database purely to read a value the referencing record already holds, adding a query per execution.",
+      "remediation": "Replace `record.reference_field.sys_id` with `record.getValue('reference_field')`, which returns the sys_id without loading the referenced record. Behaviour is equivalent, so this is a mechanical edit.",
+      "optimisation": "Cover the pattern in the platform coding standard alongside the other GlideRecord efficiency rules, so it is caught at review rather than by scan.",
+      "false_positives": [
+        "A dot-walk two levels deep where the intermediate record is genuinely needed elsewhere in the same script",
+        "Occurrence inside a block comment or a string literal",
+        "Field names that legitimately end in .sys_id on non-reference structures such as parsed JSON payloads"
+      ],
+      "fixture_cases": [
+        {
+          "name": "dot-walk through a reference field triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "d1",
+                "name": "AssignRule",
+                "active": true,
+                "oob": false,
+                "script": "var id = current.caller_id.sys_id;"
+              }
+            ]
+          }
+        },
+        {
+          "name": "direct sys_id access does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "d2",
+                "name": "DirectRule",
+                "active": true,
+                "oob": false,
+                "script": "var id = current.getValue('caller_id');\nvar own = current.sys_id;"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-008",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "setValue on a reference field without a display value",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow client scripting guidance: g_form.setValue on a reference field without the display value causes a synchronous server round trip to resolve the label"
+      ],
+      "doc_topics": [
+        "g_form setValue",
+        "reference field display value",
+        "client script performance"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "g_form\\.setValue\\([^,]+,[^,)]+\\)"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "sys_script_client (instance-wide)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "Standard change; add the display value argument, one form test per script"
+      },
+      "why": "{count} active client script(s) call g_form.setValue with two arguments ({hits} call site(s)). Where the target is a reference field, the browser blocks on a synchronous server call to resolve the display label, which is felt by every user of that form.",
+      "remediation": "For reference fields, pass the third argument: g_form.setValue(fieldName, sysId, displayValue). Where the display value is not known client-side, retrieve it asynchronously with GlideAjax rather than letting the platform resolve it synchronously.",
+      "optimisation": "Add the three-argument form to the client scripting standard and to the peer-review checklist.",
+      "false_positives": [
+        "Two-argument setValue on a non-reference field, which is correct usage and the expected majority of matches. This rule is a candidate list for review, not a defect list",
+        "Occurrence inside a block comment"
+      ],
+      "fixture_cases": [
+        {
+          "name": "two-argument setValue triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "e1",
+                "name": "SetCaller",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "g_form.setValue('caller_id', userId);"
+              }
+            ]
+          }
+        },
+        {
+          "name": "three-argument setValue does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "e2",
+                "name": "SetCallerSafe",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "g_form.setValue('caller_id', userId, userName);"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SEC-004",
+      "version": "0.1",
+      "category": "Security",
+      "title": "Browser storage used by client scripts",
+      "tier": "T2",
+      "owner": "Security team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "OWASP HTML5 security guidance: Web Storage is readable by any script on the origin and is not a place for sensitive data",
+        "ServiceNow client scripting guidance: use g_scratchpad and the session, not browser storage, for transient state"
+      ],
+      "doc_topics": [
+        "browser storage",
+        "client side data",
+        "session storage security"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\blocalStorage\\b",
+          "\\bsessionStorage\\b"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "sys_script_client (instance-wide)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Normal change; replacing stored state needs a design decision per script"
+      },
+      "why": "{count} active client script(s) read or write browser storage ({hits} occurrence(s)). Web Storage has no expiry, is not cleared on logout and is readable by any script running on the same origin, so anything placed there outlives the session and is exposed to cross-site scripting.",
+      "remediation": "Move transient state to g_scratchpad populated by a display business rule, or to a server-side session value. Where storage is used as a cache, confirm nothing user-identifying or record-identifying is written, and clear it on logout.",
+      "optimisation": "Add browser storage to the security review checklist for client-side artefacts.",
+      "false_positives": [
+        "Storage of a non-sensitive UI preference such as a collapsed panel state; still worth review, but not a security defect",
+        "Occurrence inside a block comment",
+        "Third-party library code embedded in a client script that references storage internally"
+      ],
+      "fixture_cases": [
+        {
+          "name": "localStorage write triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "f1",
+                "name": "CacheUser",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "localStorage.setItem('callerSysId', g_form.getValue('caller_id'));"
+              }
+            ]
+          }
+        },
+        {
+          "name": "scratchpad usage does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "f2",
+                "name": "UseScratchpad",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "var v = g_scratchpad.callerVip;"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SEC-005",
+      "version": "0.1",
+      "category": "Security",
+      "title": "Direct DOM manipulation in client scripts",
+      "tier": "T2",
+      "owner": "Security team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow client scripting guidance: use the g_form API; direct DOM access is unsupported and breaks across UI versions",
+        "OWASP DOM-based cross-site scripting prevention guidance on assignment to innerHTML"
+      ],
+      "doc_topics": [
+        "DOM manipulation client script",
+        "g_form API",
+        "cross site scripting"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\.innerHTML\\s*=",
+          "document\\.getElementById\\s*\\(",
+          "document\\.querySelector"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "sys_script_client (instance-wide)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Normal change; each occurrence needs a g_form equivalent and a form regression test",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 15
+          }
+        ]
+      },
+      "why": "{count} active client script(s) manipulate the DOM directly ({hits} occurrence(s)). Assignment to innerHTML with record data is a cross-site scripting path, and direct DOM access is unsupported: it breaks without warning when the platform UI changes, producing upgrade defects that are hard to attribute.",
+      "remediation": "Replace DOM access with the g_form API (setDisplay, setVisible, setValue, setLabelOf). Where markup genuinely must be injected, build it with text nodes rather than innerHTML so record data cannot be interpreted as markup.",
+      "optimisation": "Add direct DOM access to the upgrade-risk register, since these artefacts are the ones most likely to break on a UI family upgrade.",
+      "false_positives": [
+        "Read-only DOM inspection that does not write, which is lower risk but still upgrade-fragile",
+        "Occurrence inside a block comment",
+        "Scripts targeting a legacy UI page deliberately excluded from the modern UI"
+      ],
+      "fixture_cases": [
+        {
+          "name": "innerHTML assignment triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "g1",
+                "name": "RenderBanner",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "document.getElementById('banner').innerHTML = g_form.getValue('short_description');"
+              }
+            ]
+          }
+        },
+        {
+          "name": "g_form API usage does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "g2",
+                "name": "HideField",
+                "active": true,
+                "oob": false,
+                "table": "incident",
+                "script": "g_form.setDisplay('u_extra', false);"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SEC-006",
+      "version": "0.1",
+      "category": "Security",
+      "title": "Dynamic code evaluation in scripts",
+      "tier": "T2",
+      "owner": "Security team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "OWASP code injection prevention guidance: do not evaluate strings as code",
+        "ServiceNow scripting guidance on GlideScopedEvaluator and dynamic evaluation of stored script content"
+      ],
+      "doc_topics": [
+        "GlideScopedEvaluator",
+        "dynamic script evaluation",
+        "code injection"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "tables": [
+          "sys_script",
+          "sys_script_include",
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\beval\\s*\\("
+        ],
+        "unless_patterns": [
+          "GlideScopedEvaluator"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          }
+        ],
+        "exclude_oob": true,
+        "strip_comments": true,
+        "affected_area": "Scripts (custom)"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Normal change; each call needs a non-evaluating rewrite and a security review",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 10
+          }
+        ]
+      },
+      "why": "{count} active custom artefact(s) evaluate strings as code ({hits} call site(s)). Where any part of the evaluated string originates from a record field, a URL parameter or an integration payload, this is a direct code-injection path executing with the script's own privileges.",
+      "remediation": "Replace eval with explicit parsing: JSON.parse for data, a lookup map for dispatch by name, and typed field access for record values. Where evaluation of stored script is genuinely required server-side, use GlideScopedEvaluator so execution stays inside a declared scope.",
+      "optimisation": "Add eval to the peer-review block list and record any surviving occurrence as an accepted risk with a named owner and expiry.",
+      "false_positives": [
+        "Identifiers that merely contain the substring eval, such as 'evaluate' or 'retrieval'; the word-boundary pattern controls for this but nested cases exist",
+        "Occurrence inside a block comment",
+        "Scripts already routing through GlideScopedEvaluator, which are excluded by the rule"
+      ],
+      "fixture_cases": [
+        {
+          "name": "eval call triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "h1",
+                "name": "DynamicDispatch",
+                "active": true,
+                "oob": false,
+                "script": "var result = eval(payload.expression);"
+              }
+            ]
+          }
+        },
+        {
+          "name": "the word 'evaluate' does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "h2",
+                "name": "Evaluator",
+                "active": true,
+                "oob": false,
+                "script": "function evaluateRisk(x) { return x > 3; }"
+              }
+            ]
+          }
+        },
+        {
+          "name": "GlideScopedEvaluator usage does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_include": [
+              {
+                "sys_id": "h3",
+                "name": "ScopedRunner",
+                "active": true,
+                "oob": false,
+                "script": "var ev = new GlideScopedEvaluator(); ev.evaluateScript(gr, 'script');"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

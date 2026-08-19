@@ -1,0 +1,1004 @@
+{
+  "pack": "exposure-governance-v1",
+  "description": "Build wave 3: capability class A record/metadata checks. Public exposure of reports and widgets, dead or unscoped client-side artefacts, and update set release hygiene. Every rule re-derived from a primary source per D-015. Requires the extraction manifest additions shipped alongside (sys_report, sp_widget, sys_ui_script, sys_update_set, plus the client script 'type' field).",
+  "rules": [
+    {
+      "id": "ROB-SEC-007",
+      "version": "0.1",
+      "category": "Security",
+      "title": "Reports published publicly",
+      "tier": "T2",
+      "owner": "Security team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow reporting guidance: publishing a report widens its audience beyond the author and any group sharing; publication is an access decision, not a convenience setting",
+        "ServiceNow Instance Security Hardening Settings guidance on public content and unauthenticated access"
+      ],
+      "doc_topics": [
+        "published report",
+        "report sharing",
+        "report visibility"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_report",
+        "where": [
+          {
+            "field": "is_public",
+            "equals": true
+          }
+        ],
+        "label_field": "title",
+        "evidence_template": "Report '{label}' on {table} is published publicly",
+        "affected_area": "sys_report"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "Standard change; unpublish and re-share to a named group, one audience decision per report",
+        "conditional_modifiers": [
+          {
+            "modifier": "blast_radius",
+            "when_total_at_least": 5
+          }
+        ]
+      },
+      "why": "{count} report(s) are published publicly. A published report is reachable beyond its intended audience and returns whatever the underlying table exposes, so a report built for one team can become an open data extract without anyone deciding that it should be.",
+      "remediation": "For each report, confirm the intended audience with its owner. Unpublish and share to a named group or role instead. Where a report genuinely must be public, confirm the source table's ACLs restrict the columns it returns, and record the decision in the accepted-risk register.",
+      "optimisation": "Add a periodic review of published reports to the platform operating calendar, so exposure cannot accumulate silently between assessments.",
+      "false_positives": [
+        "A deliberately public report over non-sensitive reference data, for example a service catalogue index",
+        "Reports published in a sub-production instance for demonstration purposes"
+      ],
+      "fixture_cases": [
+        {
+          "name": "public report triggers",
+          "triggers": true,
+          "tables": {
+            "sys_report": [
+              {
+                "sys_id": "r1",
+                "title": "All Incidents",
+                "table": "incident",
+                "is_public": true
+              }
+            ]
+          }
+        },
+        {
+          "name": "no public reports does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_report": []
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-SEC-008",
+      "version": "0.1",
+      "category": "Security",
+      "title": "Service Portal widgets marked public",
+      "tier": "T2",
+      "owner": "Security team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow Service Portal widget guidance: the public flag makes a widget available to unauthenticated users, and its server script then runs without a user context to restrict it",
+        "OWASP broken access control guidance on unauthenticated server-side endpoints"
+      ],
+      "doc_topics": [
+        "Service Portal widget",
+        "public widget",
+        "portal security"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sp_widget",
+        "where": [
+          {
+            "field": "public",
+            "equals": true
+          }
+        ],
+        "evidence_template": "Widget '{label}' is marked public",
+        "affected_area": "sp_widget"
+      },
+      "severity": {
+        "impact": "Severe",
+        "likelihood": "Possible",
+        "effort": "Medium",
+        "assumptions": "Normal change; each widget needs its server script reviewed before the flag is cleared",
+        "conditional_modifiers": [
+          {
+            "modifier": "blast_radius",
+            "when_total_at_least": 3
+          }
+        ]
+      },
+      "why": "{count} Service Portal widget(s) are marked public. A public widget's server script executes for unauthenticated callers, so any GlideRecord query inside it runs without the requester's ACLs to constrain it. This is the most direct unauthenticated data path a portal can offer.",
+      "remediation": "For each widget, review the server script for record queries and parameter handling. Clear the public flag unless the widget is genuinely required pre-login. Where it is required, restrict the server script to a fixed query with no caller-supplied table or encoded query, and validate every input.",
+      "optimisation": "Add public widgets to the security review checklist for portal changes, and gate the flag behind peer review.",
+      "false_positives": [
+        "Login and password-reset widgets, which must be public by design and are typically vendor-shipped",
+        "Public status or announcement widgets serving non-sensitive fixed content"
+      ],
+      "fixture_cases": [
+        {
+          "name": "public widget triggers",
+          "triggers": true,
+          "tables": {
+            "sp_widget": [
+              {
+                "sys_id": "w1",
+                "name": "Ticket Lookup",
+                "public": true
+              }
+            ]
+          }
+        },
+        {
+          "name": "non-public widget does not trigger",
+          "triggers": false,
+          "tables": {
+            "sp_widget": [
+              {
+                "sys_id": "w2",
+                "name": "My Requests",
+                "public": false
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-010",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Active client scripts with an empty script field",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow client scripting guidance: every active client script is loaded and evaluated on the forms it targets, whether or not it contains logic"
+      ],
+      "doc_topics": [
+        "client script",
+        "inactive script cleanup",
+        "form load performance"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_script_client",
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "script",
+            "empty": true
+          }
+        ],
+        "evidence_template": "Client script '{label}' on {table} is active with no script body",
+        "affected_area": "sys_script_client"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Standard change; deactivate or delete, no functional testing beyond a form load",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 20
+          }
+        ]
+      },
+      "why": "{count} active client script(s) have an empty script body. They add form load weight and, more importantly, they are dead configuration that misleads anyone reading the instance: an engineer investigating form behaviour must open and dismiss each one.",
+      "remediation": "Deactivate each empty client script. Delete it once a release has passed without anyone asking for it back. Where the record is a placeholder for planned work, move that intent to the backlog rather than leaving an inert artefact on the form.",
+      "optimisation": "Reject empty script bodies at promotion, so placeholders cannot reach production.",
+      "false_positives": [
+        "A deliberately emptied script retained to preserve its sys_id for an in-flight update set",
+        "Records where the script body is held in a related list rather than the script field"
+      ],
+      "fixture_cases": [
+        {
+          "name": "empty active client script triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "1",
+                "name": "Placeholder",
+                "active": true,
+                "table": "incident",
+                "script": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "inactive empty script does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "2",
+                "name": "Retired",
+                "active": false,
+                "table": "incident",
+                "script": ""
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-011",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Client scripts with no function wrapper",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow client scripting guidance: client script logic belongs inside the generated function; code at the top level executes in the shared page scope on every form load"
+      ],
+      "doc_topics": [
+        "client script function",
+        "onLoad handler",
+        "client script structure"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "match": "none",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bfunction\\b",
+          "=>"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "script",
+            "empty": false
+          }
+        ],
+        "absence_label": "no function wrapper; code executes at page scope",
+        "affected_area": "sys_script_client"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Standard change; wrap the body in the appropriate handler, one form test per script",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 15
+          }
+        ]
+      },
+      "why": "{count} active client script(s) contain code with no function wrapper. Top-level code runs immediately on every form load rather than at the intended event, and its variables land in the shared page scope where they can collide with platform code or with each other.",
+      "remediation": "Wrap each script body in the handler its type expects (onLoad, onChange with the standard signature, onSubmit, onCellEdit). Declare variables inside the function so nothing leaks to page scope.",
+      "optimisation": "Add the wrapper check to the client-side promotion gate alongside the debug-output check.",
+      "false_positives": [
+        "A single-expression script that is legitimately declarative, for example one assignment intended to run at load",
+        "Scripts using a function form the pattern does not recognise; the rule accepts both the function keyword and arrow syntax, but obfuscated or minified bodies may still be missed or misread"
+      ],
+      "fixture_cases": [
+        {
+          "name": "top-level code triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "1",
+                "name": "Bare",
+                "active": true,
+                "table": "incident",
+                "script": "g_form.setMandatory('short_description', true);"
+              }
+            ]
+          }
+        },
+        {
+          "name": "function-wrapped script does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "2",
+                "name": "Wrapped",
+                "active": true,
+                "table": "incident",
+                "script": "function onLoad() { g_form.setMandatory('short_description', true); }"
+              }
+            ]
+          }
+        },
+        {
+          "name": "arrow function does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "3",
+                "name": "Arrow",
+                "active": true,
+                "table": "incident",
+                "script": "var onLoad = () => { g_form.setDisplay('u_x', false); };"
+              }
+            ]
+          }
+        },
+        {
+          "name": "empty script is left to ROB-TD-010",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "4",
+                "name": "Empty",
+                "active": true,
+                "table": "incident",
+                "script": ""
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-012",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "onChange client scripts with no isLoading guard",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow client scripting guidance: an onChange script receives isLoading and newValue, and should return early when the form is loading or the value is empty, otherwise it fires during form load as well as on user edits"
+      ],
+      "doc_topics": [
+        "onChange client script",
+        "isLoading newValue",
+        "client script handler"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "match": "none",
+        "tables": [
+          "sys_script_client"
+        ],
+        "field": "script",
+        "patterns": [
+          "isLoading"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "type",
+            "equals": "onchange"
+          },
+          {
+            "field": "script",
+            "empty": false
+          }
+        ],
+        "absence_label": "onChange handler never checks isLoading",
+        "affected_area": "sys_script_client (onChange)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Standard change; add the standard early return, one form test per script",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 15
+          }
+        ]
+      },
+      "why": "{count} active onChange client script(s) never reference isLoading. Without the guard the handler runs during form load as well as on user edits, so any server call, field default or message it performs happens on every single form open, multiplying its cost and sometimes overwriting values the user has not touched.",
+      "remediation": "Add the standard early return at the top of each handler: return when isLoading is true, and when newValue is empty if the logic depends on a value being present. Re-test the form load path, not only the change path.",
+      "optimisation": "Ship an onChange template in the developer standard so the guard is present by default rather than added after review.",
+      "false_positives": [
+        "A handler that deliberately must run on load, for example one that establishes an initial UI state; these should still be reviewed but are not defects",
+        "Handlers that guard using a different mechanism such as an explicit g_form state check"
+      ],
+      "fixture_cases": [
+        {
+          "name": "onChange without the guard triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "1",
+                "name": "Unguarded",
+                "active": true,
+                "type": "onchange",
+                "table": "incident",
+                "script": "function onChange(control, oldValue, newValue) { g_form.addInfoMessage('changed'); }"
+              }
+            ]
+          }
+        },
+        {
+          "name": "onChange with the guard does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "2",
+                "name": "Guarded",
+                "active": true,
+                "type": "onchange",
+                "table": "incident",
+                "script": "function onChange(control, oldValue, newValue, isLoading) { if (isLoading || newValue === '') return; }"
+              }
+            ]
+          }
+        },
+        {
+          "name": "onLoad script is out of scope",
+          "triggers": false,
+          "tables": {
+            "sys_script_client": [
+              {
+                "sys_id": "3",
+                "name": "Loader",
+                "active": true,
+                "type": "onload",
+                "table": "incident",
+                "script": "function onLoad() { g_form.setDisplay('u_x', false); }"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-013",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Business rules with no function wrapper",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow server-side scripting guidance: business rule logic belongs inside the generated executeRule function, so variables are scoped to the execution rather than shared across the server-side scope"
+      ],
+      "doc_topics": [
+        "business rule",
+        "executeRule function",
+        "server side scripting"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "match": "none",
+        "tables": [
+          "sys_script"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bfunction\\b",
+          "=>"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "script",
+            "empty": false
+          }
+        ],
+        "absence_label": "no function wrapper; variables share the server-side scope",
+        "affected_area": "sys_script"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Standard change; wrap the body in executeRule, one sub-production transaction test per rule",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 15
+          }
+        ]
+      },
+      "why": "{count} active business rule(s) contain code with no function wrapper. Unwrapped variables share the server-side scope, which produces defects that only appear under concurrency or ordering changes and are consequently very expensive to diagnose.",
+      "remediation": "Wrap each rule body in the standard executeRule(current, previous) function and declare all variables inside it. Where the rule is genuinely a one-line condition, move it to the rule's condition field instead of the script.",
+      "optimisation": "Add the wrapper check to the server-side promotion gate.",
+      "false_positives": [
+        "A one-line rule whose logic is trivially safe, still worth tidying but not a defect",
+        "Scripts using a function form the pattern does not recognise"
+      ],
+      "fixture_cases": [
+        {
+          "name": "unwrapped business rule triggers",
+          "triggers": true,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "1",
+                "name": "Bare",
+                "active": true,
+                "script": "current.setValue('state', 3);"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wrapped business rule does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_script": [
+              {
+                "sys_id": "2",
+                "name": "Wrapped",
+                "active": true,
+                "script": "(function executeRule(current, previous) { current.setValue('state', 3); })(current, previous);"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-014",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "Active UI scripts with an empty script field",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow UI script guidance: an active UI script is served to the browser wherever it is included, whether or not it contains logic"
+      ],
+      "doc_topics": [
+        "UI script",
+        "inactive script cleanup",
+        "browser script"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_ui_script",
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "script",
+            "empty": true
+          }
+        ],
+        "evidence_template": "UI script '{label}' is active with no script body",
+        "affected_area": "sys_ui_script"
+      },
+      "severity": {
+        "impact": "Minor",
+        "likelihood": "Certain",
+        "effort": "Low",
+        "assumptions": "Standard change; deactivate or delete",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 10
+          }
+        ]
+      },
+      "why": "{count} active UI script(s) have an empty script body. They are served to the browser for no benefit and, like empty client scripts, they mislead anyone reading the instance's front-end configuration.",
+      "remediation": "Deactivate each empty UI script, then delete it once a release has passed without anyone asking for it back.",
+      "optimisation": "Reject empty script bodies at promotion for UI scripts as well as client scripts.",
+      "false_positives": [
+        "A deliberately emptied script retained to preserve its sys_id for an in-flight update set",
+        "Vendor-shipped placeholders, excluded by the OOB discrimination service"
+      ],
+      "fixture_cases": [
+        {
+          "name": "empty active UI script triggers",
+          "triggers": true,
+          "tables": {
+            "sys_ui_script": [
+              {
+                "sys_id": "1",
+                "name": "LegacyHelpers",
+                "active": true,
+                "oob": false,
+                "script": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "UI script with content does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_ui_script": [
+              {
+                "sys_id": "2",
+                "name": "Helpers",
+                "active": true,
+                "oob": false,
+                "script": "function helper() { return 1; }"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-TD-015",
+      "version": "0.1",
+      "category": "Technical Debt",
+      "title": "UI scripts with no function wrapper",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow UI script guidance: a UI script is included on the page as-is, so top-level statements execute immediately and its identifiers occupy the shared page scope"
+      ],
+      "doc_topics": [
+        "UI script",
+        "global namespace",
+        "browser script structure"
+      ],
+      "detect": {
+        "type": "pattern_match",
+        "match": "none",
+        "tables": [
+          "sys_ui_script"
+        ],
+        "field": "script",
+        "patterns": [
+          "\\bfunction\\b",
+          "=>",
+          "\\bclass\\b"
+        ],
+        "where": [
+          {
+            "field": "active",
+            "equals": true
+          },
+          {
+            "field": "script",
+            "empty": false
+          }
+        ],
+        "absence_label": "no function or class wrapper; identifiers occupy page scope",
+        "affected_area": "sys_ui_script"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Standard change; wrap in a function or module pattern, one page test per script",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 10
+          }
+        ]
+      },
+      "why": "{count} active UI script(s) contain code with no function or class wrapper. Their identifiers occupy the shared page scope, so two scripts declaring the same name silently overwrite one another, and the failure surfaces only on pages that happen to include both.",
+      "remediation": "Wrap each script in a function, a class or an immediately-invoked expression that exposes only what other code needs. Namespace anything that must be global under a single object.",
+      "optimisation": "Introduce one namespace object for custom front-end code and require new UI scripts to attach to it.",
+      "false_positives": [
+        "A script that is intentionally a bare configuration assignment consumed by another script",
+        "Minified vendor libraries pasted into a UI script; these are a different finding class and belong to the vendored-library inventory work"
+      ],
+      "fixture_cases": [
+        {
+          "name": "bare UI script triggers",
+          "triggers": true,
+          "tables": {
+            "sys_ui_script": [
+              {
+                "sys_id": "1",
+                "name": "Config",
+                "active": true,
+                "oob": false,
+                "script": "var APP_TIMEOUT = 30;"
+              }
+            ]
+          }
+        },
+        {
+          "name": "wrapped UI script does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_ui_script": [
+              {
+                "sys_id": "2",
+                "name": "Helpers",
+                "active": true,
+                "oob": false,
+                "script": "function helper() { return 1; }"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-GOV-001",
+      "version": "0.1",
+      "category": "Governance",
+      "title": "Update sets without a description",
+      "tier": "T2",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A1",
+      "basis": [
+        "ServiceNow update set guidance: a set is reviewed, promoted and if necessary backed out by people who did not build it, and the description is the only record of intent that travels with it"
+      ],
+      "doc_topics": [
+        "update set",
+        "update set description",
+        "update set promotion"
+      ],
+      "detect": {
+        "type": "presence",
+        "table": "sys_update_set",
+        "where": [
+          {
+            "field": "description",
+            "empty": true
+          },
+          {
+            "field": "state",
+            "not_equals": "ignore"
+          }
+        ],
+        "evidence_template": "Update set '{label}' ({state}) has no description",
+        "affected_area": "sys_update_set"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Low",
+        "assumptions": "Standard change; the author adds a description, no technical change",
+        "conditional_modifiers": [
+          {
+            "modifier": "aggregation",
+            "when_total_at_least": 20
+          }
+        ]
+      },
+      "why": "{count} update set(s) carry no description. Whoever previews or backs one out in a downstream instance has only the name to work from, which turns a routine promotion decision into an archaeology exercise and makes a confident back-out impossible under time pressure.",
+      "remediation": "Require a description naming the change, the ticket reference and the target instances. Populate the missing ones retrospectively for any set not yet promoted; for already-promoted sets, record the intent against the change record instead.",
+      "optimisation": "Make the description mandatory on the update set form and enforce it at the promotion gate, so the class of finding cannot recur.",
+      "false_positives": [
+        "Automatically generated sets from a scoped application publish, where the description lives in the application record",
+        "Sets in an ignore or discarded state, excluded by the rule"
+      ],
+      "fixture_cases": [
+        {
+          "name": "undescribed update set triggers",
+          "triggers": true,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "1",
+                "name": "STRY0012 fix",
+                "description": "",
+                "state": "complete"
+              }
+            ]
+          }
+        },
+        {
+          "name": "described update set does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "2",
+                "name": "STRY0013",
+                "description": "Adds the vendor contract ACLs. Ticket STRY0013.",
+                "state": "complete"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-GOV-002",
+      "version": "0.1",
+      "category": "Governance",
+      "title": "Update sets left in progress beyond the review window",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow update set guidance: a set should be completed and closed once its work is done, because an open set continues to capture unrelated changes made by anyone who has it selected"
+      ],
+      "doc_topics": [
+        "update set",
+        "update set state",
+        "update set completion"
+      ],
+      "detect": {
+        "type": "staleness",
+        "table": "sys_update_set",
+        "age_field": "days_since_update",
+        "older_than_days": 90,
+        "where": [
+          {
+            "field": "state",
+            "equals": "in progress"
+          }
+        ],
+        "affected_area": "sys_update_set (in progress)"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Likely",
+        "effort": "Medium",
+        "assumptions": "Normal change; each set needs its contents reviewed before it is completed or discarded"
+      },
+      "why": "{count} update set(s) have been in progress with no activity for more than {days} days. An open set keeps collecting whatever its selector changes next, so abandoned sets accumulate unrelated records and become unsafe to promote as a unit. The longer one stays open, the less anyone can say what is in it.",
+      "remediation": "For each set, review its contents with the author. Complete and promote it, or discard it and re-capture the work in a fresh set. Do not promote a long-open set without reviewing every record it contains.",
+      "optimisation": "Report open update sets by age on the platform operating dashboard, and agree a maximum open duration with the delivery teams.",
+      "false_positives": [
+        "A long-running project set kept open deliberately under an agreed exception",
+        "Sets in an instance used for training or experimentation"
+      ],
+      "fixture_cases": [
+        {
+          "name": "stale in-progress set triggers",
+          "triggers": true,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "1",
+                "name": "Old work",
+                "state": "in progress",
+                "days_since_update": 400
+              }
+            ]
+          }
+        },
+        {
+          "name": "recent in-progress set does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "2",
+                "name": "Current work",
+                "state": "in progress",
+                "days_since_update": 3
+              }
+            ]
+          }
+        },
+        {
+          "name": "old completed set does not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "3",
+                "name": "Shipped",
+                "state": "complete",
+                "days_since_update": 400
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "ROB-GOV-003",
+      "version": "0.1",
+      "category": "Governance",
+      "title": "Update sets sharing a name",
+      "tier": "T3",
+      "owner": "Platform team",
+      "confidence": "provisional",
+      "autonomy": "A0",
+      "basis": [
+        "ServiceNow update set guidance: sets are identified by name during retrieval and preview on the target instance, so a duplicated name makes the selection ambiguous to the person promoting it"
+      ],
+      "doc_topics": [
+        "update set",
+        "update set retrieval",
+        "update set preview"
+      ],
+      "detect": {
+        "type": "duplicate_key",
+        "table": "sys_update_set",
+        "key_fields": [
+          "name"
+        ],
+        "where": [
+          {
+            "field": "state",
+            "not_equals": "ignore"
+          }
+        ],
+        "affected_area": "sys_update_set"
+      },
+      "severity": {
+        "impact": "Moderate",
+        "likelihood": "Possible",
+        "effort": "Low",
+        "assumptions": "Standard change; rename the sets that have not yet been promoted"
+      },
+      "why": "{count} update set name(s) are used by more than one set. On the target instance the person retrieving and previewing sees the name, not the sys_id, so a duplicated name makes it possible to promote the wrong set or to promote one twice while believing the second was a different change.",
+      "remediation": "Rename the unpromoted duplicates to include the ticket reference and a sequence number. Where duplicates have already been promoted, record which sys_id went to which instance against the change records.",
+      "optimisation": "Adopt a naming convention that includes the ticket reference, which makes collisions structurally unlikely.",
+      "false_positives": [
+        "Deliberate sequences such as a set re-created after a failed promotion; still worth renaming, but not a defect",
+        "Automatically generated sets from repeated scoped application publishes, which reuse the application name by design"
+      ],
+      "fixture_cases": [
+        {
+          "name": "duplicate names trigger",
+          "triggers": true,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "1",
+                "name": "Hotfix",
+                "state": "complete"
+              },
+              {
+                "sys_id": "2",
+                "name": "hotfix",
+                "state": "in progress"
+              }
+            ]
+          }
+        },
+        {
+          "name": "distinct names do not trigger",
+          "triggers": false,
+          "tables": {
+            "sys_update_set": [
+              {
+                "sys_id": "1",
+                "name": "STRY0012",
+                "state": "complete"
+              },
+              {
+                "sys_id": "2",
+                "name": "STRY0013",
+                "state": "complete"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

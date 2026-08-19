@@ -1,0 +1,14 @@
+{
+  "_comment": "Add the rob entry to claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/). Local ROB is the simple case; over SSH is the VPS case. Open an SSH tunnel first for the console links to resolve.",
+  "mcpServers": {
+    "rob": {
+      "command": "python3",
+      "args": ["-m", "rob", "mcp", "--home", "/absolute/path/to/rob_home"],
+      "cwd": "/absolute/path/to/rob-mvp"
+    },
+    "rob-vps": {
+      "command": "ssh",
+      "args": ["you@your-vps", "cd /opt/rob && /usr/bin/python3 -m rob mcp --home /var/lib/rob"]
+    }
+  }
+}
