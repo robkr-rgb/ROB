@@ -1,0 +1,1247 @@
+{
+ "pack": "datamodel-attributes-v1",
+ "description": "Build wave 6: attribute-level data model customisation. Vendor columns modified from baseline, custom columns that are never populated, never placed, oversized, unqualified or undocumented, customer values on vendor choice fields, behaviour overrides on shared task and CI columns, custom business tables without audit, and task-extending tables without a number prefix. Reads the widened sys_dictionary extraction plus sys_choice, sys_dictionary_override, sys_ui_element, sys_ui_list_element and sys_number (extraction group 15b). Every rule re-derived from ServiceNow product documentation per D-015. Specified in scanner/data-model-customisation-rules.md.",
+ "rules": [
+  {
+   "id": "ROB-DM-004",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Vendor columns modified from baseline",
+   "tier": "T3",
+   "owner": "Architect",
+   "confidence": "provisional",
+   "autonomy": "A0",
+   "basis": [
+    "ServiceNow product documentation, Upgrade process: customer-modified baseline records are skipped on upgrade and must be reviewed and resolved individually",
+    "ServiceNow product documentation, Dictionary entries: mandatory, read-only, maximum length, default value and reference qualifier are dictionary attributes whose change alters platform behaviour for every form, list, integration and script using the column"
+   ],
+   "doc_topics": [
+    "dictionary entry",
+    "skipped records upgrade",
+    "modified baseline"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_modified_oob",
+    "where": [
+     {
+      "field": "customer_modified",
+      "equals": true
+     }
+    ],
+    "exclude_oob": false,
+    "label_field": "name",
+    "evidence_template": "{label} ({type}) modified by {updated_by}",
+    "affected_area": "sys_dictionary (vendor columns with customer modifications)"
+   },
+   "severity": {
+    "impact": "Major",
+    "likelihood": "Possible",
+    "effort": "High",
+    "assumptions": "Each modification needs a decision: keep and document, or revert before the next upgrade. The decision needs the person who made it, or the ticket that asked for it, and that is research per column rather than an edit.",
+    "conditional_modifiers": [
+     {
+      "modifier": "blast_radius",
+      "when_total_at_least": 25
+     }
+    ]
+   },
+   "why": "{count} vendor dictionary column(s) carry customer modifications. Every one of them will be skipped at the next family upgrade and needs a human decision, and until then the platform behaves differently from its documentation on those fields: a vendor column made mandatory or read-only changes how out-of-box flows, integrations and the vendor's own scripts behave, in ways nobody documents because nobody expects a baseline field to have been altered.",
+   "remediation": "For each modified column decide whether the change is still needed. Where it is, record the justification in the dictionary entry's description so the next upgrade reviewer can resolve the skipped record in seconds. Where it is not, revert the column to baseline in a sub-production instance first and regression-test the forms and flows that use it. Start with the task-family tables, which carry the most vendor logic and the highest upgrade skip cost.",
+   "optimisation": "Adopt a standing rule that vendor columns are never edited directly: behaviour changes go through UI policies, data policies or dictionary overrides on the extending table, which upgrade cleanly.",
+   "false_positives": [
+    "Modifications applied by ServiceNow patches or plugin activations under a customer account, which the ledger origin check does not always separate",
+    "Label-only changes on multi-language instances, which are cosmetic and upgrade without conflict",
+    "Columns modified deliberately under a documented design decision, which should be recorded as an accepted risk rather than re-reported every scan"
+   ],
+   "fixture_cases": [
+    {
+     "name": "vendor column touched by a customer account triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_modified_oob": [
+       {
+        "sys_id": "d1",
+        "name": "incident.short_description",
+        "table": "incident",
+        "element": "short_description",
+        "type": "string",
+        "table_family": "task",
+        "on_core_family": true,
+        "mandatory": true,
+        "read_only": false,
+        "max_length": 160,
+        "has_reference_qualifier": false,
+        "has_default": false,
+        "updated_by": "jane.dev",
+        "customer_modified": true
+       }
+      ]
+     }
+    },
+    {
+     "name": "vendor column left at baseline does not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_modified_oob": [
+       {
+        "sys_id": "d2",
+        "name": "incident.description",
+        "table": "incident",
+        "element": "description",
+        "type": "string",
+        "table_family": "task",
+        "on_core_family": true,
+        "mandatory": false,
+        "read_only": false,
+        "max_length": 4000,
+        "has_reference_qualifier": false,
+        "has_default": false,
+        "updated_by": "system",
+        "customer_modified": false
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-005",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Custom columns never populated",
+   "tier": "T2",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A1",
+   "basis": [
+    "ServiceNow product documentation, Dictionary entries: a column exists in the table's storage, forms, lists, reporting sources and API surface from the moment it is created, whether or not it holds data",
+    "ServiceNow product documentation, Upgrade planning: every customisation, including unused columns, stays in scope of upgrade review until it is removed"
+   ],
+   "doc_topics": [
+    "delete field",
+    "dictionary entry",
+    "custom field"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_columns",
+    "where": [
+     {
+      "field": "populated_count",
+      "equals": 0
+     },
+     {
+      "field": "table_row_count",
+      "gt": 100
+     },
+     {
+      "field": "days_since_created",
+      "gt": 90
+     }
+    ],
+    "exclude_oob": false,
+    "label_field": "name",
+    "evidence_template": "{label} ({type}): no value on any of {table_row_count} records, created {days_since_created} days ago",
+    "affected_area": "sys_dictionary (unpopulated custom columns)"
+   },
+   "severity": {
+    "impact": "Minor",
+    "likelihood": "Certain",
+    "effort": "Low",
+    "assumptions": "Retiring a column is a single administrative action once nothing references it. The reference check (scripts, reports, transform maps, forms) is the work, and it is a few minutes per column.",
+    "conditional_modifiers": [
+     {
+      "modifier": "aggregation",
+      "when_total_at_least": 25
+     }
+    ]
+   },
+   "why": "{count} custom column(s) on populated tables have never been given a value on any record. Each one still occupies a form or list slot, appears in report and filter pickers, is carried through every upgrade review and is exposed on the table's API. A column that has held nothing for months is either a requirement that was dropped or an integration that never went live, and either way it misleads the next person who tries to understand the data model.",
+   "remediation": "For each column, search scripts, reports, transform maps, flows and UI elements for references. Where none exist, remove the column from forms and lists first, then delete the dictionary entry through a normal change captured in an update set. Where an integration is expected to populate it, record that on the dictionary description and set a review date so the next scan can distinguish waiting from dead.",
+   "optimisation": "Require a stated data source or owning process on every new custom column at design review, so a column that never fills up has a name attached to the question of why.",
+   "false_positives": [
+    "Columns staged ahead of an integration or process go-live that has not happened yet",
+    "Columns populated only in production, scanned on a sub-production clone where the data has been excluded or scrambled",
+    "Columns used only as transient scratch by a script that clears them again, which show as empty at any point in time"
+   ],
+   "fixture_cases": [
+    {
+     "name": "old empty column on a populated table triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c1",
+        "name": "incident.u_legacy_ref",
+        "table": "incident",
+        "element": "u_legacy_ref",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 8200,
+        "populated_count": 0,
+        "days_since_created": 600
+       }
+      ]
+     }
+    },
+    {
+     "name": "recently created empty column does not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c2",
+        "name": "incident.u_new_ref",
+        "table": "incident",
+        "element": "u_new_ref",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 8200,
+        "populated_count": 0,
+        "days_since_created": 12
+       },
+       {
+        "sys_id": "c3",
+        "name": "incident.u_used_ref",
+        "table": "incident",
+        "element": "u_used_ref",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 8200,
+        "populated_count": 40,
+        "days_since_created": 600
+       },
+       {
+        "sys_id": "c4",
+        "name": "u_pilot.u_unknown",
+        "table": "u_pilot",
+        "element": "u_unknown",
+        "type": "string",
+        "on_vendor_table": false,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": null,
+        "populated_count": null,
+        "days_since_created": 600
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-006",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Custom columns not placed on any form or list",
+   "tier": "T2",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A1",
+   "basis": [
+    "ServiceNow product documentation, Form layout and list layout: a field is visible to users only when a form section (sys_ui_element) or list layout (sys_ui_list_element) includes it",
+    "ServiceNow product documentation, Dictionary entries: columns not on any form remain readable and writable through the API, import sets and scripts"
+   ],
+   "doc_topics": [
+    "form layout",
+    "list layout",
+    "custom field"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_columns",
+    "where": [
+     {
+      "field": "placed",
+      "equals": false
+     }
+    ],
+    "exclude_oob": false,
+    "label_field": "name",
+    "evidence_template": "{label} ({type}) is on no form section or list layout",
+    "affected_area": "sys_dictionary (custom columns absent from every form and list)"
+   },
+   "severity": {
+    "impact": "Minor",
+    "likelihood": "Certain",
+    "effort": "Low",
+    "assumptions": "Each column needs one decision: place it, document it as integration-only, or retire it. The reference check from the unpopulated-column rule applies and is a few minutes per column.",
+    "conditional_modifiers": [
+     {
+      "modifier": "aggregation",
+      "when_total_at_least": 20
+     }
+    ]
+   },
+   "why": "{count} custom column(s) appear on no form section and no list layout, so no user can see or edit them through the interface. Some are integration-only fields, which is legitimate but undocumented; the rest are dead structure that nobody can even notice is there. Both kinds confuse reporting, where the column still appears as a choice, and both survive every upgrade review unchanged because nobody has a reason to open them.",
+   "remediation": "For each column, check whether an import set, transform map, REST integration or script populates it. Where one does, add a one-line description on the dictionary entry naming the source, so the column is recognisably integration-only. Where nothing does, treat it as unused: confirm no references and retire it through a normal change. Where a user process needs it, add it to the relevant form section.",
+   "optimisation": "Make form placement or a documented data source part of the definition of done for a new column, so an invisible column cannot be created by accident.",
+   "false_positives": [
+    "Fields used only by Service Portal widgets, Workspace forms or catalog variables, whose placement lives in tables this rule does not read",
+    "Fields intentionally exposed only through the API for an integration, which are legitimate once documented",
+    "Fields on tables whose forms are wholly defined in a scoped application's own UI, where the standard form tables are not used"
+   ],
+   "fixture_cases": [
+    {
+     "name": "column on no form or list triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c5",
+        "name": "incident.u_hidden_flag",
+        "table": "incident",
+        "element": "u_hidden_flag",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": false,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    },
+    {
+     "name": "column placed on a form does not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c6",
+        "name": "incident.u_vendor_notes",
+        "table": "incident",
+        "element": "u_vendor_notes",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-007",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Oversized string columns on high-volume tables",
+   "tier": "T3",
+   "owner": "Architect",
+   "confidence": "provisional",
+   "autonomy": "A0",
+   "basis": [
+    "ServiceNow product documentation, Dictionary entries and field types: string columns above the base-row length threshold are stored outside the table's main row, which affects query and list performance on the table",
+    "ServiceNow product documentation, Performance best practice for large tables: task and CMDB tables are the highest-volume tables on the platform and the most sensitive to row width"
+   ],
+   "doc_topics": [
+    "field length",
+    "string field",
+    "large table performance"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_columns",
+    "where": [
+     {
+      "field": "oversized",
+      "equals": true
+     }
+    ],
+    "exclude_oob": false,
+    "label_field": "name",
+    "evidence_template": "{label}: string of {max_length} characters on the {table_family} family",
+    "affected_area": "sys_dictionary (oversized custom string columns)"
+   },
+   "severity": {
+    "impact": "Moderate",
+    "likelihood": "Likely",
+    "effort": "Medium",
+    "assumptions": "Reducing a length is a dictionary change plus a check that no stored value exceeds the new limit. Moving free text to a journal or related table is a small design change and a data migration, estimated per column."
+   },
+   "why": "{count} custom string column(s) are declared long enough to force storage off the base row on task or CMDB family tables, or exceed the platform's large-string threshold anywhere. Every list, report and query over those tables pays for that width whether or not the column is populated, and on the task family that cost lands on the forms fulfillers use all day.",
+   "remediation": "For each column, compare the declared length with the longest value actually stored. Where the data allows, reduce max_length to a realistic bound in a sub-production instance and confirm no truncation. Where genuinely long text is needed, move it to a journal field or a related table with a reference, so the base row stays narrow.",
+   "optimisation": "Set a default maximum for new string columns on task and CMDB tables in the platform standards, and require an explicit justification above it.",
+   "false_positives": [
+    "Columns that legitimately store long text such as payloads or descriptions, where the length is the requirement",
+    "Journal, HTML and translated-text types, which are excluded at detection but can be misdeclared as string",
+    "Low-volume extending tables where the family classification overstates the actual row count"
+   ],
+   "fixture_cases": [
+    {
+     "name": "8000-character string on incident triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c7",
+        "name": "incident.u_vendor_dump",
+        "table": "incident",
+        "element": "u_vendor_dump",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 8000,
+        "oversized": true,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    },
+    {
+     "name": "40-character string does not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c8",
+        "name": "incident.u_vendor_code",
+        "table": "incident",
+        "element": "u_vendor_code",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-008",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Reference columns without a qualifier on user, group, CI or task targets",
+   "tier": "T2",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A1",
+   "basis": [
+    "ServiceNow product documentation, Reference qualifiers: a reference qualifier restricts the records a reference field offers; without one every record in the referenced table is selectable",
+    "ServiceNow product documentation, User administration: deactivated users remain in sys_user and are returned by unqualified reference lookups"
+   ],
+   "doc_topics": [
+    "reference qualifier",
+    "reference field",
+    "dynamic reference qualifier"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_columns",
+    "where": [
+     {
+      "field": "type",
+      "equals": "reference"
+     },
+     {
+      "field": "reference_to_picker_target",
+      "equals": true
+     },
+     {
+      "field": "has_reference_qualifier",
+      "equals": false
+     }
+    ],
+    "exclude_oob": false,
+    "label_field": "name",
+    "evidence_template": "{label} references {reference} with no qualifier",
+    "affected_area": "sys_dictionary (unqualified custom reference columns)"
+   },
+   "severity": {
+    "impact": "Moderate",
+    "likelihood": "Likely",
+    "effort": "Low",
+    "assumptions": "Applying the standard qualifier is a one-field dictionary change per column, followed by a check that existing values still satisfy it.",
+    "conditional_modifiers": [
+     {
+      "modifier": "blast_radius",
+      "when_total_at_least": 15
+     }
+    ]
+   },
+   "why": "{count} custom reference column(s) point at user, group, CI or task tables with no reference qualifier. The picker offers every record in the target, including deactivated users, retired CIs and closed tasks, so assignments and relationships are routinely made to records that should not be selectable. On sys_user targets this is also an information exposure: the full user directory is browsable from any form carrying the field.",
+   "remediation": "Apply the standard qualifier for each target: active users and groups, operational CIs, open tasks, narrowed further where the process requires it. Set it in a sub-production instance first and check that existing values on the field still satisfy the qualifier, so that saved records do not fail validation. Where a field genuinely needs historical records, record the reason on the dictionary entry.",
+   "optimisation": "Publish standard qualifiers per target table in the platform standards and apply them by default when a reference column is created.",
+   "false_positives": [
+    "Fields that must offer historical records, such as audit or HR case references to departed staff",
+    "Fields whose restriction is enforced by an ACL or a UI policy rather than a qualifier",
+    "Reference targets that are small, fully active tables where an unqualified picker is harmless"
+   ],
+   "fixture_cases": [
+    {
+     "name": "unqualified reference to sys_user triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c9",
+        "name": "sc_req_item.u_approver_backup",
+        "table": "sc_req_item",
+        "element": "u_approver_backup",
+        "type": "reference",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "sys_user",
+        "reference_root": "sys_user",
+        "reference_to_picker_target": true,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    },
+    {
+     "name": "qualified reference and reference to a small table do not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c10",
+        "name": "sc_req_item.u_approver",
+        "table": "sc_req_item",
+        "element": "u_approver",
+        "type": "reference",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "sys_user",
+        "reference_root": "sys_user",
+        "reference_to_picker_target": true,
+        "has_reference_qualifier": true,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       },
+       {
+        "sys_id": "c11",
+        "name": "sc_req_item.u_region",
+        "table": "sc_req_item",
+        "element": "u_region",
+        "type": "reference",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "u_region",
+        "reference_root": "u_region",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-009",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Undocumented custom columns",
+   "tier": "T2",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A1",
+   "basis": [
+    "ServiceNow product documentation, Dictionary entries: the column label is what users, report builders and integrators see; the description is the only place the platform holds a column's purpose",
+    "ServiceNow product documentation, Field labels and language files: labels are stored per language in sys_documentation and default to the element name when not set"
+   ],
+   "doc_topics": [
+    "field label",
+    "dictionary entry",
+    "column description"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_columns",
+    "where": [
+     {
+      "field": "undocumented",
+      "equals": true
+     }
+    ],
+    "exclude_oob": false,
+    "label_field": "name",
+    "evidence_template": "{label}: label '{column_label}' with no usable description",
+    "affected_area": "sys_dictionary (undocumented custom columns)"
+   },
+   "severity": {
+    "impact": "Minor",
+    "likelihood": "Certain",
+    "effort": "Low",
+    "assumptions": "A label and a one-line description per column, written by whoever owns the process. No technical change, no testing.",
+    "conditional_modifiers": [
+     {
+      "modifier": "aggregation",
+      "when_total_at_least": 50
+     }
+    ]
+   },
+   "why": "{count} custom column(s) carry a placeholder label or no description on a core table. Their purpose is not recoverable from the platform: a report builder sees 'u_string_3', an integrator guesses at the semantics, and the next upgrade reviewer cannot tell whether the field still matters. Undocumented columns are how a data model becomes something only one departed person understood.",
+   "remediation": "For each column, set a business label and a one-line description stating what the field holds and which process writes it. Start with the task-family and CMDB tables, where the columns are seen by the most people. Where the owner cannot be found, that is itself the finding: treat the column as a candidate for the unpopulated and unplaced checks.",
+   "optimisation": "Make label and description mandatory in the platform's design review for new columns, and expose them on the form's field help so the documentation is seen where it is needed.",
+   "false_positives": [
+    "Instances that hold data-model documentation outside the platform, where the dictionary description is deliberately unused; reframe as a maturity observation if most columns are affected",
+    "Labels that legitimately equal the element name because the element name is the business term",
+    "Columns on custom tables outside the task and CMDB families, where an empty description alone does not trigger"
+   ],
+   "fixture_cases": [
+    {
+     "name": "placeholder label triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c12",
+        "name": "incident.u_string_3",
+        "table": "incident",
+        "element": "u_string_3",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "u_string_3",
+        "placeholder_label": true,
+        "comments_empty": true,
+        "undocumented": true,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    },
+    {
+     "name": "labelled and described column does not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_columns": [
+       {
+        "sys_id": "c13",
+        "name": "incident.u_vendor_notes",
+        "table": "incident",
+        "element": "u_vendor_notes",
+        "type": "string",
+        "on_vendor_table": true,
+        "table_family": "task",
+        "on_core_family": true,
+        "max_length": 40,
+        "oversized": false,
+        "reference": "",
+        "reference_root": "",
+        "reference_to_picker_target": false,
+        "has_reference_qualifier": false,
+        "column_label": "Vendor notes",
+        "placeholder_label": false,
+        "comments_empty": false,
+        "undocumented": false,
+        "placed": true,
+        "table_row_count": 5000,
+        "populated_count": 120,
+        "days_since_created": 400
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-010",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Custom choices added to vendor choice fields",
+   "tier": "T3",
+   "owner": "Process owner",
+   "confidence": "provisional",
+   "autonomy": "A0",
+   "basis": [
+    "ServiceNow product documentation, Choice lists: choice values are stored in sys_choice per table, element and language, and business rules, SLA definitions and reports reference them by value",
+    "ServiceNow product documentation, Task state model and Incident state model: out-of-box state values drive the state flow, SLA conditions, notifications and Performance Analytics indicators shipped with the application"
+   ],
+   "doc_topics": [
+    "choice list",
+    "incident state",
+    "task state model"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_choice",
+    "where": [
+     {
+      "field": "designed_for_extension",
+      "equals": false
+     },
+     {
+      "field": "inactive",
+      "equals": false
+     }
+    ],
+    "exclude_oob": true,
+    "label_field": "name",
+    "evidence_template": "{table}.{element}: custom value '{value}' ('{choice_label}')",
+    "affected_area": "sys_choice (customer values on vendor choice fields)"
+   },
+   "severity": {
+    "impact": "Major",
+    "likelihood": "Likely",
+    "effort": "Medium",
+    "assumptions": "Each added value needs a review of every vendor artefact that branches on the field: business rules, SLA definitions, notifications, reports and indicators. The review is scoped by field, so estimate per field rather than per value.",
+    "conditional_modifiers": [
+     {
+      "modifier": "blast_radius",
+      "when_total_at_least": 10
+     }
+    ]
+   },
+   "why": "{count} customer choice value(s) have been added to vendor choice fields. Out-of-box business rules, SLA definitions, notifications, reports and Performance Analytics indicators branch on the baseline value set and do not know the added values exist, so records carrying them fall through state flows, drop out of SLA clocks and vanish from shipped reports. On state, priority and approval fields the damage is silent and lands on process metrics.",
+   "remediation": "For each affected field, list the vendor artefacts that reference it and check how each handles the added value: state-flow rules, SLA start and stop conditions, notification conditions and shipped reports. Where the value duplicates an existing one, retire it with a data migration to the baseline value. Where it is genuinely new, extend each dependent artefact explicitly and document the value on the choice record.",
+   "optimisation": "Route process variations through sub-states, categories or custom fields rather than extending vendor state and priority sets, so shipped logic stays valid across upgrades.",
+   "false_positives": [
+    "Values added by a ServiceNow plugin activation under a customer account, which the ledger origin check does not always separate",
+    "Fields the vendor documents as customer-extensible beyond category and subcategory, which are reported here at the same severity",
+    "Instances where the added values were introduced together with full coverage of the dependent artefacts, which should be recorded as accepted risk"
+   ],
+   "fixture_cases": [
+    {
+     "name": "custom incident state value triggers",
+     "triggers": true,
+     "tables": {
+      "sys_choice": [
+       {
+        "sys_id": "ch1",
+        "name": "incident.state=25",
+        "table": "incident",
+        "element": "state",
+        "value": "25",
+        "choice_label": "Pending Vendor",
+        "inactive": false,
+        "table_family": "task",
+        "branching_field": true,
+        "designed_for_extension": false,
+        "oob": false
+       }
+      ]
+     }
+    },
+    {
+     "name": "custom category value does not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_choice": [
+       {
+        "sys_id": "ch2",
+        "name": "incident.category=facilities",
+        "table": "incident",
+        "element": "category",
+        "value": "facilities",
+        "choice_label": "Facilities",
+        "inactive": false,
+        "table_family": "task",
+        "branching_field": false,
+        "designed_for_extension": true,
+        "oob": false
+       },
+       {
+        "sys_id": "ch3",
+        "name": "incident.state=7",
+        "table": "incident",
+        "element": "state",
+        "value": "7",
+        "choice_label": "Closed",
+        "inactive": false,
+        "table_family": "task",
+        "branching_field": true,
+        "designed_for_extension": false,
+        "oob": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-011",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Dictionary overrides changing behaviour of shared task and CI columns",
+   "tier": "T3",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A0",
+   "basis": [
+    "ServiceNow product documentation, Dictionary overrides: an override changes mandatory, read-only, default value, reference qualifier or calculation of an inherited column for one extending table only",
+    "ServiceNow product documentation, UI policies and data policies: form behaviour such as mandatory and read-only is intended to be expressed as policy, which is visible, conditional and upgrade-safe"
+   ],
+   "doc_topics": [
+    "dictionary override",
+    "data policy",
+    "ui policy"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary_override",
+    "where": [
+     {
+      "field": "overrides_behaviour",
+      "equals": true
+     },
+     {
+      "field": "base_table",
+      "in": [
+       "task",
+       "cmdb_ci"
+      ]
+     }
+    ],
+    "exclude_oob": true,
+    "label_field": "name",
+    "evidence_template": "{label} overrides {behaviour_overrides}",
+    "affected_area": "sys_dictionary_override (behaviour overrides on task and cmdb_ci columns)"
+   },
+   "severity": {
+    "impact": "Moderate",
+    "likelihood": "Possible",
+    "effort": "Medium",
+    "assumptions": "Documenting an override is a description edit. Replacing a mandatory or read-only override with a UI or data policy is a small piece of configuration plus a form test, per override.",
+    "conditional_modifiers": [
+     {
+      "modifier": "aggregation",
+      "when_total_at_least": 20
+     }
+    ]
+   },
+   "why": "{count} customer dictionary override(s) change how an inherited task or CI column behaves on one extending table. Overrides are not visible on the column's own dictionary entry, so an administrator investigating why a field is mandatory on one form and not another can spend hours before finding one. Mandatory and read-only overrides in particular duplicate what UI and data policies do visibly and conditionally, and unlike policies they apply unconditionally to API and import writes.",
+   "remediation": "Inventory each override with the reason it exists. Replace mandatory and read-only overrides with a UI policy where the intent is form behaviour, or a data policy where the intent is data integrity, and delete the override once the policy is proven in a sub-production instance. Keep overrides that change a default or a reference qualifier, and record the reason on the override record.",
+   "optimisation": "Adopt policy-first as the standard for field behaviour on extending tables, reserving dictionary overrides for defaults and qualifiers.",
+   "false_positives": [
+    "Overrides shipped by ServiceNow applications such as ITSM, HR or CSM, separated by the ledger origin check",
+    "Reference qualifier and default value overrides, which are often the correct mechanism and are reported at the same severity here",
+    "Overrides on tables with a small user base where the visibility problem is minor"
+   ],
+   "fixture_cases": [
+    {
+     "name": "mandatory override on a task column triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary_override": [
+       {
+        "sys_id": "ov1",
+        "name": "sc_req_item.short_description",
+        "table": "sc_req_item",
+        "base_table": "task",
+        "element": "short_description",
+        "behaviour_overrides": [
+         "mandatory_override"
+        ],
+        "overrides_behaviour": true,
+        "oob": false
+       }
+      ]
+     }
+    },
+    {
+     "name": "attribute-only override and vendor override do not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary_override": [
+       {
+        "sys_id": "ov2",
+        "name": "sc_req_item.description",
+        "table": "sc_req_item",
+        "base_table": "task",
+        "element": "description",
+        "behaviour_overrides": [],
+        "overrides_behaviour": false,
+        "oob": false
+       },
+       {
+        "sys_id": "ov3",
+        "name": "incident.state",
+        "table": "incident",
+        "base_table": "task",
+        "element": "state",
+        "behaviour_overrides": [
+         "default_value_override"
+        ],
+        "overrides_behaviour": true,
+        "oob": true
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "id": "ROB-DM-012",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Custom tables with auditing disabled",
+   "tier": "T1",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A1",
+   "basis": [
+    "ServiceNow product documentation, Auditing: the audit flag on a table's dictionary entry controls whether field changes are recorded in sys_audit and shown as history, and is enabled per table",
+    "ServiceNow Instance Security Hardening guidance: audit history on business record tables supports compliance evidence, incident investigation and rollback of unwanted changes"
+   ],
+   "doc_topics": [
+    "audit table",
+    "history set",
+    "sys_audit"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_dictionary",
+    "where": [
+     {
+      "field": "internal_type",
+      "equals": "collection"
+     },
+     {
+      "field": "is_custom",
+      "equals": true
+     },
+     {
+      "field": "audit",
+      "equals": false
+     },
+     {
+      "field": "row_count",
+      "gt": 100
+     },
+     {
+      "field": "log_like",
+      "equals": false
+     }
+    ],
+    "exclude_oob": true,
+    "label_field": "name",
+    "evidence_template": "Custom table {label} ({row_count} records) has auditing disabled",
+    "affected_area": "sys_dictionary (custom business tables without audit)"
+   },
+   "severity": {
+    "impact": "Moderate",
+    "likelihood": "Likely",
+    "effort": "Low",
+    "assumptions": "Enabling audit is a single flag per table. The only consideration is sys_audit growth on high-churn tables, which is a capacity note rather than a design change."
+   },
+   "why": "{count} populated custom table(s) have auditing disabled. Changes to their records leave no history: nobody can see who changed a value, when, or what it was before, which removes the evidence trail auditors ask for, the investigation trail platform teams rely on and the ability to reverse an unwanted change. For a table built to hold business records, no history is a silent gap until the day it is needed.",
+   "remediation": "Enable the audit flag on each table's dictionary entry through a normal change, in a sub-production instance first. For high-churn tables, estimate sys_audit growth from the table's update rate and confirm the retention policy covers it. Auditing applies from the moment it is enabled; history before that point is not recoverable.",
+   "optimisation": "Make audit-on the default in the platform standard for new custom tables, with an explicit opt-out for log-like and staging tables.",
+   "false_positives": [
+    "High-volume telemetry, staging or integration tables where auditing is deliberately off, partly excluded by name pattern and extension root",
+    "Tables holding reference data that never changes after load, where history has no value",
+    "Sub-production instances where audit flags were bulk-disabled after a clone to save space"
+   ],
+   "fixture_cases": [
+    {
+     "name": "populated custom business table without audit triggers",
+     "triggers": true,
+     "tables": {
+      "sys_dictionary": [
+       {
+        "sys_id": "coll1",
+        "name": "u_vendor_contract",
+        "internal_type": "collection",
+        "is_custom": true,
+        "audit": false,
+        "row_count": 4120,
+        "extension_root": "u_vendor_contract",
+        "log_like": false,
+        "oob": false
+       }
+      ]
+     }
+    },
+    {
+     "name": "audited table and log-like table do not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_dictionary": [
+       {
+        "sys_id": "coll2",
+        "name": "u_supplier",
+        "internal_type": "collection",
+        "is_custom": true,
+        "audit": true,
+        "row_count": 900,
+        "extension_root": "u_supplier",
+        "log_like": false,
+        "oob": false
+       },
+       {
+        "sys_id": "coll3",
+        "name": "u_integration_log",
+        "internal_type": "collection",
+        "is_custom": true,
+        "audit": false,
+        "row_count": 90000,
+        "extension_root": "u_integration_log",
+        "log_like": true,
+        "oob": false
+       }
+      ]
+     }
+    }
+   ],
+   "remediation_pack": {
+    "kind": "update_fields",
+    "slug": "enable-audit",
+    "set": {
+     "audit": true
+    },
+    "scope_statement": "Changes ONLY the audit flag on the sys_dictionary collection records listed. Does not alter columns, access controls, business rules or existing records, and does not create or purge any history. Audit starts at apply time; earlier changes are not reconstructed.",
+    "instructions_extra": "After applying, open a record on each table, change a field and confirm the change appears under History. Review sys_audit growth after a week on any high-churn table."
+   }
+  },
+  {
+   "id": "ROB-DM-013",
+   "version": "0.1",
+   "category": "Data Model",
+   "title": "Task-extending custom tables without a number prefix",
+   "tier": "T1",
+   "owner": "Platform team",
+   "confidence": "provisional",
+   "autonomy": "A1",
+   "basis": [
+    "ServiceNow product documentation, Number maintenance: each task-extending table needs its own sys_number record to define the prefix and counter for its records; without one, records use the parent's numbering",
+    "ServiceNow product documentation, Task table extension: extending tables inherit number generation from task unless a number definition is created for them"
+   ],
+   "doc_topics": [
+    "number maintenance",
+    "sys_number",
+    "extend task table"
+   ],
+   "detect": {
+    "type": "presence",
+    "table": "sys_db_object",
+    "where": [
+     {
+      "field": "is_custom",
+      "equals": true
+     },
+     {
+      "field": "extends_task",
+      "equals": true
+     },
+     {
+      "field": "has_number_prefix",
+      "equals": false
+     }
+    ],
+    "exclude_oob": true,
+    "label_field": "name",
+    "evidence_template": "{label} extends task and has no number definition",
+    "affected_area": "sys_db_object (task-extending custom tables without sys_number)"
+   },
+   "severity": {
+    "impact": "Minor",
+    "likelihood": "Certain",
+    "effort": "Low",
+    "assumptions": "One sys_number record per table with a chosen prefix. Existing records keep their TASK numbers unless renumbered, which is usually not worth doing."
+   },
+   "why": "{count} custom table(s) extend task with no number definition of their own, so their records are numbered as generic TASK entries. In lists, global search, email subjects and integrations those records are indistinguishable from every other task type, and anyone routing by prefix, which most service desks and integrations do, misfiles them.",
+   "remediation": "Create a Number Maintenance record for each table with a distinct prefix and a starting counter above the current maximum. New records pick up the prefix immediately; leave existing records as they are unless a renumbering is explicitly planned, since references and email threads carry the old numbers.",
+   "optimisation": "Include number definition in the table creation checklist for anything extending task, and reserve prefixes centrally so two teams cannot pick the same one.",
+   "false_positives": [
+    "Tables that deliberately share the parent's prefix as part of a process design, which is rare and should be recorded as accepted risk",
+    "Tables created in a scoped application whose numbering is defined under the application's own scope name, which the category match may miss",
+    "Tables never intended to hold records directly and only extended further"
+   ],
+   "fixture_cases": [
+    {
+     "name": "task-extending table with no sys_number triggers",
+     "triggers": true,
+     "tables": {
+      "sys_db_object": [
+       {
+        "sys_id": "t7",
+        "name": "u_facility_request",
+        "is_custom": true,
+        "scope": "global",
+        "super_class": "task",
+        "extension_root": "task",
+        "extension_depth": 1,
+        "extends_task": true,
+        "has_number_prefix": false,
+        "row_count": 2900,
+        "oob": false
+       }
+      ]
+     }
+    },
+    {
+     "name": "numbered table and non-task table do not trigger",
+     "triggers": false,
+     "tables": {
+      "sys_db_object": [
+       {
+        "sys_id": "t8",
+        "name": "u_legal_case",
+        "is_custom": true,
+        "scope": "global",
+        "super_class": "task",
+        "extension_root": "task",
+        "extension_depth": 1,
+        "extends_task": true,
+        "has_number_prefix": true,
+        "row_count": 120,
+        "oob": false
+       },
+       {
+        "sys_id": "t9",
+        "name": "u_region",
+        "is_custom": true,
+        "scope": "global",
+        "super_class": "",
+        "extension_root": "u_region",
+        "extension_depth": 0,
+        "extends_task": false,
+        "has_number_prefix": false,
+        "row_count": 12,
+        "oob": false
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

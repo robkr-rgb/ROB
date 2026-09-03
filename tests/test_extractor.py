@@ -254,3 +254,123 @@ def test_scope_and_integration_transforms_are_derived_not_left_to_rules():
     priv = snap["tables"]["sys_scope_privilege"][0]
     assert (priv["status"], priv["operation"], priv["target_type"]) == ("requested", "write", "table")
     assert snap["tables"]["sys_rest_message"][0]["insecure_transport"] is True
+
+
+def test_data_model_attribute_transforms_are_derived_not_left_to_rules():
+    """Wave 6 (ROB-DM-004..013): every join a dictionary rule would need is done here."""
+    client = FakeClient()
+
+    def rows(table, fields, query="", cap=20000, display=False):
+        client.queries.append(("rows", table, tuple(fields), query))
+        if table == "sys_dictionary":
+            if "internal_type=collection" in query:
+                return [{"sys_id": "coll1", "name": "u_vendor_contracts", "audit": "false",
+                         "sys_created_by": "rob.admin", "sys_created_on": "2025-01-01 00:00:00"}]
+            if "sys_updated_byNOT IN" in query:
+                return [{"sys_id": "dmod1", "name": "incident", "element": "short_description",
+                         "internal_type": "string", "mandatory": "true", "max_length": "160",
+                         "sys_updated_by": "jane.dev", "sys_created_by": "system"}]
+            return [
+                {"sys_id": "dc1", "name": "incident", "element": "u_vendor_dump", "internal_type": "string",
+                 "max_length": "8000", "column_label": "u_vendor_dump", "comments": "",
+                 "sys_created_on": "2024-01-01 00:00:00"},
+                {"sys_id": "dc2", "name": "sc_req_item", "element": "u_backup_approver", "internal_type": "reference",
+                 "reference": "sys_user", "reference_qual": "", "column_label": "Backup approver",
+                 "comments": "Stand-in approver", "sys_created_on": "2024-01-01 00:00:00"},
+                {"sys_id": "dc3", "name": "sc_req_item", "element": "u_region", "internal_type": "reference",
+                 "reference": "u_region", "reference_qual": "active=true", "column_label": "Region",
+                 "comments": "Delivery region", "sys_created_on": "2024-01-01 00:00:00"},
+            ]
+        if table == "sys_ui_element":
+            return [{"element": "u_backup_approver", "sys_ui_section.name": "sc_req_item"}]
+        if table == "sys_ui_list_element":
+            return []
+        if table == "sys_number":
+            return [{"sys_id": "n1", "category": "u_legal_case", "prefix": "LGL"}]
+        if table == "sys_choice":
+            return [{"sys_id": "ch1", "name": "incident", "element": "state", "value": "25", "label": "Pending Vendor",
+                     "inactive": "false", "sys_created_by": "jane.dev", "sys_created_on": "2025-01-01 00:00:00"},
+                    {"sys_id": "ch2", "name": "incident", "element": "category", "value": "facilities",
+                     "label": "Facilities", "inactive": "false", "sys_created_by": "jane.dev",
+                     "sys_created_on": "2025-01-01 00:00:00"}]
+        if table == "sys_dictionary_override":
+            return [{"sys_id": "ov1", "name": "sc_req_item", "base_table": "task", "element": "short_description",
+                     "mandatory_override": "true", "read_only_override": "false",
+                     "sys_created_by": "jane.dev", "sys_created_on": "2025-01-01 00:00:00"}]
+        if table == "sys_db_object" and "super_class" in fields:
+            return [{"sys_id": "t1", "name": "task", "super_class": "", "sys_scope": "global"},
+                    {"sys_id": "t2", "name": "incident", "super_class": "task", "sys_scope": "global"},
+                    {"sys_id": "t3", "name": "sc_req_item", "super_class": "task", "sys_scope": "global"},
+                    {"sys_id": "t4", "name": "u_legal_case", "super_class": "task", "sys_scope": "global"},
+                    {"sys_id": "t5", "name": "u_facility_request", "super_class": "task", "sys_scope": "global"},
+                    {"sys_id": "t6", "name": "u_vendor_contracts", "super_class": "", "sys_scope": "global"}]
+        return list(client.data.get(table, []))
+
+    counts = {}
+
+    def count(table, query=""):
+        client.queries.append(("count", table, query))
+        counts[(table, query)] = counts.get((table, query), 0) + 1
+        if query.endswith("ISNOTEMPTY"):
+            return 0 if "u_vendor_dump" in query else 17
+        return 5000
+
+    client.rows, client.count = rows, count
+    snap = build_snapshot(client, "x", progress=lambda *_: None)
+    T = snap["tables"]
+
+    cols = {c["name"]: c for c in T["sys_dictionary_columns"]}
+    dump = cols["incident.u_vendor_dump"]
+    assert dump["oversized"] is True and dump["on_core_family"] is True
+    assert dump["placed"] is False and dump["populated_count"] == 0
+    assert dump["placeholder_label"] is True and dump["undocumented"] is True
+    approver = cols["sc_req_item.u_backup_approver"]
+    assert approver["reference_to_picker_target"] is True and approver["has_reference_qualifier"] is False
+    assert approver["placed"] is True and approver["undocumented"] is False
+    region = cols["sc_req_item.u_region"]
+    assert region["reference_to_picker_target"] is False and region["has_reference_qualifier"] is True
+    # One population aggregate per column, never a record read.
+    assert sum(1 for k in counts if k[1].endswith("ISNOTEMPTY")) == 3
+
+    assert T["sys_dictionary_modified_oob"][0]["name"] == "incident.short_description"
+    assert T["sys_dictionary_modified_oob"][0]["mandatory"] is True
+
+    coll = T["sys_dictionary"][0]
+    assert coll["internal_type"] == "collection" and coll["audit"] is False and coll["is_custom"] is True
+
+    tables = {t["name"]: t for t in T["sys_db_object"]}
+    assert tables["u_facility_request"]["extends_task"] is True and tables["u_facility_request"]["has_number_prefix"] is False
+    assert tables["u_legal_case"]["has_number_prefix"] is True
+    assert tables["incident"]["extends_task"] is True and tables["task"]["extends_task"] is False
+
+    choices = {c["name"]: c for c in T["sys_choice"]}
+    assert choices["incident.state=25"]["branching_field"] is True
+    assert choices["incident.state=25"]["designed_for_extension"] is False
+    assert choices["incident.category=facilities"]["designed_for_extension"] is True
+
+    ov = T["sys_dictionary_override"][0]
+    assert ov["overrides_behaviour"] is True and ov["behaviour_overrides"] == ["mandatory_override"]
+
+
+def test_column_population_count_is_capped_and_declared(monkeypatch):
+    from rob import extractor as ex
+
+    monkeypatch.setattr(ex, "COLUMN_COUNT_CAP", 3)
+    client = FakeClient()
+    many = [{"sys_id": f"dc{i}", "name": "incident", "element": f"u_col_{i}", "internal_type": "string",
+             "column_label": f"Col {i}", "comments": "x", "sys_created_on": "2024-01-01 00:00:00"} for i in range(7)]
+    orig_rows = client.rows
+
+    def rows(table, fields, query="", cap=20000, display=False):
+        if table == "sys_dictionary":
+            return many if "internal_type!=collection" in query else []
+        return orig_rows(table, fields, query, cap, display)
+
+    client.rows = rows
+    snap = ex.build_snapshot(client, "x", progress=lambda *_: None)
+    populated = [c["populated_count"] for c in snap["tables"]["sys_dictionary_columns"]]
+    assert len(populated) == 7
+    assert sum(1 for p in populated if p is not None) == 3
+    assert sum(1 for p in populated if p is None) == 4
+    gap = snap["aggregates"]["column_population_gap"]
+    assert gap["cap"] == 3 and gap["columns"] == 7

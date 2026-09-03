@@ -39,7 +39,7 @@ python3 -m rob scan --snapshot fixtures/pdi_like_snapshot.json --out out/ --incl
 | `rob/rules/` | 15 validated seed rules: TD 3, SEC 3, UPG 3, CMDB 6 (per scanner/scan-rules.md) |
 | `rob/rules/declarative.py` | Nine detection primitives; a rule as a spec record rather than a method (D-014) |
 | `rob/rules/pack.py` | Rule pack loader: validates governance, enforces version bumps via `packs/pack.lock.json` |
-| `rob/rules/packs/` | Declarative rule packs (JSON), 36 rules across 10 categories. Pack rules start in shadow until their false-positive rate is measured |
+| `rob/rules/packs/` | Declarative rule packs (JSON), 58 rules across 10 categories (73 rules, 12 categories with the seed library). Pack rules start in shadow until their false-positive rate is measured |
 | `rob/fixpacks/` | Generators for ROB-SEC-003 (T1) and ROB-CMDB-004 dangling rels (T1); five-element contract enforced |
 | `rob/report.py` | Executive summary (no sys_ids) + technical report (full traces) |
 | `fixtures/` | Deterministic synthetic snapshot simulating a customised instance |

@@ -515,6 +515,80 @@ T["sys_script_client"].append({
 
 
 
+# --- Wave 6: attribute-level data model customisation (ROB-DM-004..013) --------
+for t in T["sys_db_object"]:
+    t["has_number_prefix"] = t["name"] in ("u_legacy_data",)
+    t["extends_task"] = t.get("extension_root") == "task" and t["name"] != "task" and t["is_custom"]
+
+
+def _col(i, table, element, **kw):
+    base = {"sys_id": sid("dcol", i), "name": f"{table}.{element}", "table": table, "element": element,
+            "type": "string", "on_vendor_table": not table.startswith(("u_", "x_")),
+            "table_family": "task", "on_core_family": True, "max_length": 40, "oversized": False,
+            "reference": "", "reference_root": "", "reference_to_picker_target": False,
+            "has_reference_qualifier": False, "column_label": element.replace("u_", "").replace("_", " ").title(),
+            "placeholder_label": False, "comments_empty": False, "undocumented": False, "placed": True,
+            "table_row_count": 8200, "populated_count": 300, "days_since_created": 700}
+    base.update(kw)
+    return base
+
+
+T["sys_dictionary_columns"] = (
+    # DM-005: never populated, old, on a populated table
+    [_col(i, "incident", f"u_legacy_ref_{i}", populated_count=0) for i in range(6)]
+    # DM-006: never placed on a form or list
+    + [_col(10 + i, "incident", f"u_hidden_{i}", placed=False) for i in range(4)]
+    # DM-007: oversized strings on the task family
+    + [_col(20 + i, "incident", f"u_vendor_dump_{i}", max_length=8000, oversized=True) for i in range(2)]
+    # DM-008: unqualified reference to sys_user
+    + [_col(30 + i, "sc_req_item", f"u_backup_approver_{i}", type="reference", reference="sys_user",
+            reference_root="sys_user", reference_to_picker_target=True) for i in range(3)]
+    # DM-009: placeholder labels
+    + [_col(40 + i, "incident", f"u_string_{i}", column_label=f"u_string_{i}", placeholder_label=True,
+            comments_empty=True, undocumented=True) for i in range(5)]
+    # Clean control columns
+    + [_col(50 + i, "change_request", f"u_cab_note_{i}") for i in range(3)]
+)
+T["sys_dictionary_modified_oob"] = [
+    {"sys_id": sid("dmod", i), "name": f"incident.{e}", "table": "incident", "element": e, "type": "string",
+     "table_family": "task", "on_core_family": True, "mandatory": i % 2 == 0, "read_only": False,
+     "max_length": 160, "has_reference_qualifier": False, "has_default": False,
+     "updated_by": "jane.dev", "customer_modified": True}
+    for i, e in enumerate(["short_description", "close_notes", "u_reserved", "category"])
+]
+T["sys_dictionary"] = [
+    {"sys_id": sid("dcoll", 0), "name": "u_vendor_contracts", "internal_type": "collection", "is_custom": True,
+     "audit": False, "row_count": 4120, "extension_root": "sys_metadata", "log_like": False, "oob": False},
+    {"sys_id": sid("dcoll", 1), "name": "u_legacy_data", "internal_type": "collection", "is_custom": True,
+     "audit": True, "row_count": 12000, "extension_root": "task", "log_like": False, "oob": False},
+    {"sys_id": sid("dcoll", 2), "name": "u_integration_log", "internal_type": "collection", "is_custom": True,
+     "audit": False, "row_count": 90000, "extension_root": "u_integration_log", "log_like": True, "oob": False},
+]
+T["sys_choice"] = [
+    {"sys_id": sid("chc", i), "name": f"incident.state={v}", "table": "incident", "element": "state",
+     "value": str(v), "choice_label": lbl, "inactive": False, "table_family": "task",
+     "branching_field": True, "designed_for_extension": False, "oob": False}
+    for i, (v, lbl) in enumerate([(25, "Pending Vendor"), (26, "Pending Customer"), (27, "Escalated")])
+] + [
+    {"sys_id": sid("chc_ok", 0), "name": "incident.category=facilities", "table": "incident", "element": "category",
+     "value": "facilities", "choice_label": "Facilities", "inactive": False, "table_family": "task",
+     "branching_field": False, "designed_for_extension": True, "oob": False},
+]
+T["sys_dictionary_override"] = [
+    {"sys_id": sid("ovr", i), "name": f"sc_req_item.{e}", "table": "sc_req_item", "base_table": "task",
+     "element": e, "behaviour_overrides": ["mandatory_override"], "overrides_behaviour": True, "oob": False}
+    for i, e in enumerate(["short_description", "assignment_group", "due_date"])
+] + [
+    {"sys_id": sid("ovr_ok", 0), "name": "sc_req_item.description", "table": "sc_req_item", "base_table": "task",
+     "element": "description", "behaviour_overrides": [], "overrides_behaviour": False, "oob": False},
+]
+# DM-013: a task-extending custom table with no number prefix
+T["sys_db_object"].append({
+    "sys_id": sid("tbl_fac", 0), "name": "u_facility_request", "row_count": 2900, "columns": [],
+    "reference_data_only": False, "is_custom": True, "scope": "global", "super_class": "task",
+    "extension_depth": 1, "extension_root": "task", "extends_task": True, "has_number_prefix": False})
+
+
 out = pathlib.Path(__file__).parent / "pdi_like_snapshot.json"
 out.write_text(json.dumps(SNAP, indent=1))
 print(f"Wrote {out} ({out.stat().st_size} bytes)")

@@ -36,6 +36,11 @@ PROPERTY_BASELINE_NAMES = sorted(_SEC003.BASELINE)
 
 OOB_CREATORS = {"system", "glide.maint", "maint"}
 
+# Population aggregates for custom columns (group 15b): one count per column,
+# capped so a heavily customised instance cannot turn extraction into thousands
+# of requests. Beyond the cap the gap is declared in the snapshot.
+COLUMN_COUNT_CAP = 500
+
 
 class SNClient:
     """Minimal read-only Table/Stats API client."""
@@ -518,6 +523,231 @@ def build_snapshot(client: SNClient, instance_id: str, progress=print) -> dict:
          "type": _disp(r.get("internal_type"))}
         for r in custom_columns if _disp(r.get("name"))
     ]
+
+    progress("[15b/18] Data model attributes (dictionary, choices, overrides, placement, numbering)")
+    # Attribute-level customisation. Group 15 answers "what tables exist and how
+    # deep"; this group answers what has been done to individual columns, which
+    # is where most of the invisible upgrade and usability cost of a data model
+    # sits. Every join is done here so the rules stay declarative (D-014).
+    CORE_FAMILIES = {"task", "cmdb_ci"}
+    PICKER_TARGETS = {"sys_user", "sys_user_group", "cmdb_ci", "task"}
+    PLACEHOLDER_LABELS = ("field", "new field", "new", "test", "temp", "tmp", "copy", "string", "integer", "reference")
+    LOG_LIKE_MARKERS = ("_log", "_staging", "_stage", "_import", "_hist", "_audit", "_archive", "_temp", "_tmp")
+
+    def _truthy(v) -> bool:
+        return v in ("true", True, "1", 1)
+
+    def _to_int(v) -> int | None:
+        try:
+            return int(str(_disp(v)).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _customer_modified(record: dict, table: str) -> bool:
+        """Definitive via the ledger; falls back to the updater when the ledger is absent."""
+        if customer_touched is not None:
+            return f"{table}_{record.get('sys_id', '')}" in customer_touched
+        return (_disp(record.get("sys_updated_by")) or "").lower() not in OOB_CREATORS
+
+    dict_fields = ["sys_id", "name", "element", "internal_type", "max_length", "reference",
+                   "reference_qual", "reference_qual_condition", "dynamic_ref_qual", "mandatory",
+                   "read_only", "default_value", "column_label", "comments", "audit",
+                   "sys_created_on", "sys_created_by", "sys_updated_by"]
+
+    # (a) Every custom column, wherever it lives: u_ columns on vendor tables plus
+    #     all columns on custom tables.
+    custom_col_rows = client.rows(
+        "sys_dictionary", dict_fields,
+        query="elementSTARTSWITHu_^ORnameSTARTSWITHu_^ORnameSTARTSWITHx_^elementISNOTEMPTY^internal_type!=collection",
+        display=True, cap=20000)
+    # (b) Vendor columns a customer has touched. Vendor installs and upgrades
+    #     leave sys_updated_by as system/maint; a human updater is the signal,
+    #     confirmed against the ledger when the ledger was readable.
+    modified_rows = client.rows(
+        "sys_dictionary", dict_fields,
+        query="nameNOT LIKEu_^nameNOT LIKEx_^elementISNOTEMPTY^elementNOT LIKEu_"
+              "^sys_updated_byNOT INsystem,glide.maint,maint",
+        display=True, cap=20000)
+    # (c) Collection rows of custom tables: the table-level flags (audit) live here,
+    #     and this is the record an audit fix writes to.
+    collection_rows = client.rows(
+        "sys_dictionary", ["sys_id", "name", "audit", "sys_created_on", "sys_created_by"],
+        query="internal_type=collection^nameSTARTSWITHu_^ORnameSTARTSWITHx_", display=True, cap=20000)
+
+    # Placement: only custom elements, so the read stays proportional to the
+    # customisation rather than to the whole form catalogue.
+    form_placed: set[tuple[str, str]] = set()
+    for r in client.rows("sys_ui_element", ["element", "sys_ui_section.name"],
+                         query="elementSTARTSWITHu_", display=True, cap=50000):
+        form_placed.add((_disp(r.get("sys_ui_section.name")).lower(), _disp(r.get("element")).lower()))
+    list_placed: set[tuple[str, str]] = set()
+    for r in client.rows("sys_ui_list_element", ["element", "sys_ui_list.name"],
+                         query="elementSTARTSWITHu_", display=True, cap=50000):
+        list_placed.add((_disp(r.get("sys_ui_list.name")).lower(), _disp(r.get("element")).lower()))
+    placed_elements = {e for _, e in form_placed} | {e for _, e in list_placed}
+
+    numbered = {_disp(r.get("category")).lower()
+                for r in client.rows("sys_number", ["sys_id", "category", "prefix"], display=True, cap=5000)}
+
+    table_meta = {t["name"]: t for t in T["sys_db_object"]}
+    descendants_of_core: dict[str, str] = {t["name"]: t.get("extension_root", t["name"]) for t in T["sys_db_object"]}
+
+    def _family(table_name: str) -> str:
+        return descendants_of_core.get(table_name, _root(table_name))
+
+    # Population counts: one aggregate per column, capped. Beyond the cap the
+    # count is None and the rule cannot fire, and the gap is declared rather
+    # than the column silently reported as populated or empty.
+    table_rows_cache: dict[str, int | None] = {}
+
+    def _table_rows(table_name: str) -> int | None:
+        if table_name not in table_rows_cache:
+            prior = table_meta.get(table_name, {}).get("row_count")
+            if prior is None:
+                try:
+                    prior = client.count(table_name)
+                except (PermissionError, ConnectionError, urllib.error.HTTPError):
+                    prior = None
+            table_rows_cache[table_name] = prior
+        return table_rows_cache[table_name]
+
+    columns_out = []
+    counted = 0
+    for r in custom_col_rows:
+        table_name, element = _disp(r.get("name")), _disp(r.get("element"))
+        if not table_name or not element:
+            continue
+        itype = (_disp(r.get("internal_type")) or "").lower()
+        label = _disp(r.get("column_label")).strip()
+        # ServiceNow derives the element from the label, so "Backup approver" for
+        # u_backup_approver is normal. A placeholder is an empty label, the raw
+        # element name left as the label, or a vocabulary word ("string 3").
+        norm_label = label.lower().strip()
+        raw_element = element.lower().strip()
+        family = _family(table_name)
+        on_core = family in CORE_FAMILIES or table_name in CORE_FAMILIES
+        max_len = _to_int(r.get("max_length"))
+        ref_target = _disp(r.get("reference"))
+        ref_root = _family(ref_target) if ref_target else ""
+        has_qual = bool(_disp(r.get("reference_qual")) or _disp(r.get("reference_qual_condition"))
+                        or _disp(r.get("dynamic_ref_qual")))
+        placed = (table_name.lower(), element.lower()) in form_placed or \
+                 (table_name.lower(), element.lower()) in list_placed or \
+                 (element.lower() in placed_elements and not (form_placed or list_placed))
+        total_rows = _table_rows(table_name)
+        populated = None
+        if counted < COLUMN_COUNT_CAP and total_rows:
+            try:
+                populated = client.count(table_name, f"{element}ISNOTEMPTY")
+            except (PermissionError, ConnectionError, urllib.error.HTTPError):
+                populated = None
+            counted += 1
+        placeholder = (not label) or norm_label == raw_element or norm_label in PLACEHOLDER_LABELS \
+            or any(norm_label.startswith(p + " ") for p in PLACEHOLDER_LABELS)
+        columns_out.append({
+            "sys_id": r.get("sys_id", ""), "name": f"{table_name}.{element}",
+            "table": table_name, "element": element, "type": itype,
+            "on_vendor_table": not table_name.startswith(("u_", "x_")),
+            "table_family": family, "on_core_family": on_core,
+            "max_length": max_len,
+            # >255 leaves the base row on task/cmdb families; >4000 does so anywhere.
+            "oversized": itype == "string" and max_len is not None and (
+                (on_core and max_len > 255) or max_len > 4000),
+            "reference": ref_target, "reference_root": ref_root,
+            "reference_to_picker_target": ref_root in PICKER_TARGETS or ref_target in PICKER_TARGETS,
+            "has_reference_qualifier": has_qual,
+            "column_label": label, "placeholder_label": placeholder,
+            "comments_empty": not _disp(r.get("comments")).strip(),
+            "undocumented": placeholder or (on_core and not _disp(r.get("comments")).strip()),
+            "placed": placed,
+            "table_row_count": total_rows,
+            "populated_count": populated,
+            "days_since_created": _days_since(_disp(r.get("sys_created_on")), now),
+        })
+    T["sys_dictionary_columns"] = sorted(columns_out, key=lambda c: c["name"])
+    if len(custom_col_rows) > COLUMN_COUNT_CAP:
+        snap["aggregates"]["column_population_gap"] = {
+            "cap": COLUMN_COUNT_CAP, "columns": len(custom_col_rows),
+            "note": "populated_count is None beyond the cap; ROB-DM-005 cannot fire on those columns",
+        }
+
+    T["sys_dictionary_modified_oob"] = sorted([
+        {
+            "sys_id": r.get("sys_id", ""), "name": f"{_disp(r.get('name'))}.{_disp(r.get('element'))}",
+            "table": _disp(r.get("name")), "element": _disp(r.get("element")),
+            "type": (_disp(r.get("internal_type")) or "").lower(),
+            "table_family": _family(_disp(r.get("name"))),
+            "on_core_family": _family(_disp(r.get("name"))) in CORE_FAMILIES or _disp(r.get("name")) in CORE_FAMILIES,
+            "mandatory": _truthy(_disp(r.get("mandatory"))), "read_only": _truthy(_disp(r.get("read_only"))),
+            "max_length": _to_int(r.get("max_length")),
+            "has_reference_qualifier": bool(_disp(r.get("reference_qual")) or _disp(r.get("reference_qual_condition"))),
+            "has_default": bool(_disp(r.get("default_value"))),
+            "updated_by": _disp(r.get("sys_updated_by")),
+            "customer_modified": True,
+        }
+        for r in modified_rows
+        if _disp(r.get("name")) and _disp(r.get("element")) and _customer_modified(r, "sys_dictionary")
+    ], key=lambda c: c["name"])
+
+    # T["sys_dictionary"] holds collection rows for custom tables only. The name
+    # is the real table because the audit fix (ROB-DM-012) writes to it.
+    T["sys_dictionary"] = sorted([
+        {
+            "sys_id": r.get("sys_id", ""), "name": _disp(r.get("name")),
+            "internal_type": "collection", "is_custom": True,
+            "audit": _truthy(_disp(r.get("audit"))),
+            "row_count": table_meta.get(_disp(r.get("name")), {}).get("row_count"),
+            "extension_root": _family(_disp(r.get("name"))),
+            "log_like": any(m in _disp(r.get("name")).lower() for m in LOG_LIKE_MARKERS)
+                        or _family(_disp(r.get("name"))) in ("sys_import_set_row", "syslog"),
+            "oob": _is_oob(r, cutoff, customer_touched, "sys_dictionary"),
+        }
+        for r in collection_rows if _disp(r.get("name"))
+    ], key=lambda c: c["name"])
+    for t in T["sys_db_object"]:
+        t["has_number_prefix"] = t["name"].lower() in numbered
+        t["extends_task"] = t.get("extension_root") == "task" and t["name"] != "task"
+
+    BRANCHING_ELEMENTS = {"state", "priority", "impact", "urgency", "approval", "type", "stage",
+                          "escalation", "close_code", "risk", "phase", "hold_reason"}
+    EXTENSIBLE_ELEMENTS = {"category", "subcategory", "u_category", "contact_type"}
+    T["sys_choice"] = sorted([
+        {
+            "sys_id": r.get("sys_id", ""), "name": f"{_disp(r.get('name'))}.{_disp(r.get('element'))}={_disp(r.get('value'))}",
+            "table": _disp(r.get("name")), "element": _disp(r.get("element")),
+            "value": _disp(r.get("value")), "choice_label": _disp(r.get("label")),
+            "inactive": _truthy(_disp(r.get("inactive"))),
+            "table_family": _family(_disp(r.get("name"))),
+            "branching_field": _disp(r.get("element")).lower() in BRANCHING_ELEMENTS,
+            "designed_for_extension": _disp(r.get("element")).lower() in EXTENSIBLE_ELEMENTS,
+            "oob": _is_oob(r, cutoff, customer_touched, "sys_choice"),
+        }
+        for r in client.rows(
+            "sys_choice",
+            ["sys_id", "name", "element", "value", "label", "inactive", "language", "sys_created_by", "sys_created_on"],
+            query="nameNOT LIKEu_^nameNOT LIKEx_^elementNOT LIKEu_^language=en"
+                  "^sys_created_byNOT INsystem,glide.maint,maint",
+            display=True, cap=20000)
+        if _disp(r.get("name")) and _disp(r.get("element"))
+    ], key=lambda c: c["name"])
+
+    OVERRIDE_FLAGS = ("mandatory_override", "read_only_override", "default_value_override",
+                      "reference_qual_override", "calculation_override")
+    T["sys_dictionary_override"] = sorted([
+        {
+            "sys_id": r.get("sys_id", ""), "name": f"{_disp(r.get('name'))}.{_disp(r.get('element'))}",
+            "table": _disp(r.get("name")), "base_table": _disp(r.get("base_table")),
+            "element": _disp(r.get("element")),
+            "behaviour_overrides": [f for f in OVERRIDE_FLAGS if _truthy(_disp(r.get(f)))],
+            "overrides_behaviour": any(_truthy(_disp(r.get(f))) for f in OVERRIDE_FLAGS),
+            "oob": _is_oob(r, cutoff, customer_touched, "sys_dictionary_override"),
+        }
+        for r in client.rows(
+            "sys_dictionary_override",
+            ["sys_id", "name", "base_table", "element", *OVERRIDE_FLAGS, "sys_created_by", "sys_created_on"],
+            query="sys_created_byNOT INsystem,glide.maint,maint", display=True, cap=20000)
+        if _disp(r.get("name")) and _disp(r.get("element"))
+    ], key=lambda c: c["name"])
 
     progress("[16/18] Scheduled jobs and notifications")
     inactive_users = {u["sys_id"] for u in T.get("sys_user", []) if not u.get("active")}
