@@ -108,6 +108,15 @@ def tool_definitions() -> list[dict]:
                     "fingerprint": {"type": "string"},
                     "approval_token": {"type": "string", "description": "Minted by a human in the console."},
                     "target_env": {"type": "string", "enum": ["sub-production"]},
+                    "inputs": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                        "description": (
+                            "Values for fixes that declare approver inputs (D-028), name -> value. "
+                            "Only a human should decide these; if missing, the refusal lists what is "
+                            "needed and you should ask the operator rather than invent a value."
+                        ),
+                    },
                 },
                 "required": ["run_id", "fingerprint", "target_env"],
                 "additionalProperties": False,

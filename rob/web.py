@@ -577,6 +577,11 @@ def make_handler(state: AppState):
             for f in solvable:
                 badge = f"<span class=\'pill sev-{html.escape(str(f['severity']).lower())}\'>{html.escape(str(f['severity']))}</span>"
                 accepted = " &middot; <span class='muted'>accepted risk</span>" if f["accepted"] else ""
+                # D-028: a fix with declared approver inputs asks first.
+                asks = orch.remediation_inputs(f["rule_id"])
+                label = "Review &amp; approve" if asks else "Approve &amp; apply"
+                asks_note = (f"<br><span class='muted'>asks: {html.escape(', '.join(i['name'] for i in asks))}</span>"
+                             if asks else "")
                 rows += f"""<tr>
                   <td>{badge}<br><span class="muted">{html.escape(f['priority'] or '')}</span></td>
                   <td><strong>{html.escape(f['title'] or '')}</strong><br>
@@ -588,8 +593,8 @@ def make_handler(state: AppState):
                     <form method="post" action="/agent/approve" style="margin:0">
                       <input type="hidden" name="run_id" value="{latest['run_id']}">
                       <input type="hidden" name="fingerprint" value="{html.escape(f['fingerprint'])}">
-                      <button type="submit" class="ghost">Approve &amp; apply</button>
-                    </form>
+                      <button type="submit" class="ghost">{label}</button>
+                    </form>{asks_note}
                   </td></tr>"""
             if not rows:
                 rows = "<tr><td colspan='5' class='muted'>Nothing in this run has a generated fix-pack.</td></tr>"
@@ -678,9 +683,59 @@ def make_handler(state: AppState):
             orch = state.orchestrator
             run_id = int(form.get("run_id", "0"))
             fingerprint = form.get("fingerprint", "")
+            rule_id = fingerprint.split(":", 1)[0]
+
+            # D-028: a fix that declares approver inputs asks its questions
+            # BEFORE an approval token exists. Confidence is checked first so
+            # an unmeasured rule gets the honest measurement refusal instead
+            # of a form for a fix that cannot run anyway.
+            required = orch.remediation_inputs(rule_id)
+            confidence = "validated"
+            fres = orch.findings(run_id, actor="console")
+            if fres.ok:
+                match = next((x for x in fres.data.get("findings", []) if x["fingerprint"] == fingerprint), None)
+                if match:
+                    confidence = match.get("confidence", "validated")
+            supplied: dict[str, str] = {}
+            if required and confidence == "validated":
+                missing = []
+                for item in required:
+                    v = (form.get(f"input_{item['name']}") or "").strip()
+                    if v:
+                        supplied[item["name"]] = v
+                    else:
+                        missing.append(item)
+                if missing:
+                    fields = "".join(
+                        f"<label>{html.escape(i['name'])}</label>"
+                        f"<input name=\"input_{html.escape(i['name'])}\" "
+                        f"value=\"{html.escape(supplied.get(i['name'], ''))}\" autocomplete=\"off\">"
+                        f"<div class='muted' style='margin:4px 0 10px'>{html.escape(i['prompt'])}</div>"
+                        for i in required
+                    )
+                    return page("Fix inputs", f"""<h1>This fix has a question</h1>
+                    <div class="muted">{html.escape(fingerprint)}</div>
+                    <div class="card" style="margin-top:14px; max-width:640px">
+                      <p>The declared fix for <code>{html.escape(rule_id)}</code> needs a value the
+                      snapshot cannot supply. ROB never guesses it: you decide, and your answer is
+                      recorded in the audit log as part of the approval.</p>
+                      <form method="post" action="/agent/approve">
+                        <input type="hidden" name="run_id" value="{run_id}">
+                        <input type="hidden" name="fingerprint" value="{html.escape(fingerprint)}">
+                        {fields}
+                        <div style="margin-top:12px">
+                          <button type="submit" class="ghost">Approve &amp; apply with these values</button>
+                          <a href="/agent" style="margin-left:12px">Cancel</a>
+                        </div>
+                      </form>
+                    </div>
+                    <div class="muted" style="margin-top:10px">No approval token exists yet. Nothing has
+                    been read from or written to the instance by this page.</div>""")
+
             # The token is minted HERE, by a human form POST, and nowhere else.
             token = orch.mint_approval(run_id, fingerprint, actor="console-operator")
-            result = orch.apply(run_id, fingerprint, token, "sub-production", actor="console-operator")
+            result = orch.apply(run_id, fingerprint, token, "sub-production",
+                                inputs=supplied or None, actor="console-operator")
             pack = orch.fixpack(run_id, fingerprint, actor="console-operator")
             body = f"<h1>Approval recorded</h1><div class='muted'>{html.escape(fingerprint)}</div>"
 

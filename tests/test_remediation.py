@@ -298,6 +298,157 @@ def test_engine_generates_executable_packs_with_no_per_rule_python():
     assert unresolved_inputs(packs["ROB-OPS-001"].operations) == ["service_account_sys_id"]
 
 
+# --- 5. the approval flow asks the question ---------------------------------
+
+INPUT_RULE = "ROB-TST-901"
+
+
+def input_rule_spec() -> dict:
+    spec = rem_spec(id=INPUT_RULE, tier="T1", confidence="validated",
+                    title="Jobs needing a service account")
+    spec["detect"] = {"type": "presence", "table": "sysauto_script",
+                      "affected_area": "sysauto_script (test)",
+                      "where": [{"field": "run_as_inactive", "equals": True}],
+                      "label_field": "name"}
+    spec["fixture_cases"] = [
+        {"name": "trigger", "triggers": True, "tables": {"sysauto_script": [
+            {"sys_id": "j1", "name": "job", "active": True, "run_as": "u9", "run_as_inactive": True}]}},
+        {"name": "no trigger", "triggers": False, "tables": {"sysauto_script": []}},
+    ]
+    spec["remediation_pack"] = {
+        "kind": "update_fields", "slug": "repoint",
+        "set": {"run_as": {"$input": "service_account_sys_id"}},
+        "inputs": {"service_account_sys_id": "which service account should own these jobs"},
+        "scope_statement": "Changes only run_as on the listed jobs.",
+    }
+    validate(spec)
+    return spec
+
+
+def orch_with_input_rule(tmp_path, monkeypatch, dry_run: bool):
+    """Orchestrator + stored run for a validated rule whose fix asks a question."""
+    import json as _json
+    import pathlib
+    import sys as _sys
+
+    from rob.agent import Orchestrator
+    from rob.rules import RULE_REGISTRY
+    from rob.rules.declarative import DeclarativeRule
+    from rob.store import connect, store_run
+
+    spec = input_rule_spec()
+    monkeypatch.setitem(RULE_REGISTRY, INPUT_RULE, DeclarativeRule(spec))
+    seed = {"sysauto_script": {"j1": {
+        "sys_id": "j1", "name": "job", "active": True, "run_as": "u9", "run_as_inactive": True}}}
+    monkeypatch.setenv("FAKE_SEED", _json.dumps(seed))
+
+    home = tmp_path / "home"
+    (home / "webruns").mkdir(parents=True)
+    snapshot = snap({"sysauto_script": [dict(seed["sysauto_script"]["j1"])]})
+    result = run_scan(snapshot)
+    run_id = store_run(connect(home / "rob_history.db"), result)
+    rd = home / "webruns" / f"run_{run_id}"
+    rd.mkdir()
+    (rd / "snapshot.json").write_text(_json.dumps(
+        {"instance_id": "t", "taken_at": snapshot.taken_at, "tables": snapshot.tables, "aggregates": {}}))
+
+    fake = str(pathlib.Path(__file__).parent / "fake_nowaikit_write.py")
+    orch = Orchestrator(home, b"k" * 32, {
+        "autonomy_ceilings": {"_default": "A2"},
+        "global_dry_run": dry_run,
+        "executor": {"kind": "nowaikit", "command": f"{_sys.executable} {fake}"},
+    })
+    return orch, run_id
+
+
+def test_orchestrator_lists_declared_inputs_with_prompts():
+    from rob.agent import Orchestrator
+
+    o = Orchestrator.__new__(Orchestrator)  # remediation_inputs reads only the registry
+    assert Orchestrator.remediation_inputs(o, "ROB-OPS-001") == [
+        {"name": "service_account_sys_id",
+         "prompt": "sys_id of the service account that should own scheduled execution for these jobs. "
+                   "Create or identify it first and grant it only the roles the jobs need."}]
+    assert Orchestrator.remediation_inputs(o, "ROB-INT-001") == []
+    assert Orchestrator.remediation_inputs(o, "ROB-SEC-003") == []
+
+
+def test_apply_refuses_without_inputs_and_names_the_question(tmp_path, monkeypatch):
+    orch, run_id = orch_with_input_rule(tmp_path, monkeypatch, dry_run=False)
+    fp = f"{INPUT_RULE}:sysauto_script (test)"
+    token = orch.mint_approval(run_id, fp, actor="test")
+    res = orch.apply(run_id, fp, token, "sub-production", actor="test")
+    assert not res.ok
+    assert "approver-supplied values" in res.refusal
+    assert "service_account_sys_id" in res.refusal
+    assert "which service account" in res.refusal  # the prompt travels with the refusal
+
+
+def test_apply_binds_inputs_and_executes_through_the_declarative_path(tmp_path, monkeypatch):
+    """Covers the _load_fixpack fallback too: ROB-TST-901 has no hand-written
+    generator, so the pack is regenerated from the spec's remediation block."""
+    orch, run_id = orch_with_input_rule(tmp_path, monkeypatch, dry_run=False)
+    fp = f"{INPUT_RULE}:sysauto_script (test)"
+    token = orch.mint_approval(run_id, fp, actor="test")
+    res = orch.apply(run_id, fp, token, "sub-production", actor="test",
+                     inputs={"service_account_sys_id": "svc42"})
+    assert res.ok and res.data["applied"] is True and res.data["verified"]
+    assert res.data["operations_applied"] == ["j1"]
+    # The answer is part of the audited approval, in full.
+    last = [e for e in orch.audit_tail(10) if e["tool"] == "apply"][-1]
+    assert last["args"]["inputs"] == {"service_account_sys_id": "svc42"}
+
+
+def test_console_asks_before_minting_then_applies_with_the_answer(tmp_path, monkeypatch):
+    import http.client
+    import threading
+    import urllib.parse as _u
+    from http.server import ThreadingHTTPServer
+
+    from rob.web import AppState, make_handler
+
+    orch, run_id = orch_with_input_rule(tmp_path, monkeypatch, dry_run=True)
+    state = AppState(tmp_path / "home")
+    state.config.update(orch.config)
+    state.save_config()
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(state))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        port = httpd.server_address[1]
+
+        def req(method, path, body=None, cookie=None):
+            c = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+            h = {"Content-Type": "application/x-www-form-urlencoded"}
+            if cookie:
+                h["Cookie"] = cookie
+            c.request(method, path, body=body, headers=h)
+            r = c.getresponse()
+            return r, r.read().decode()
+
+        req("POST", "/setup", _u.urlencode({"password": "pw12345678", "password2": "pw12345678"}))
+        r, _ = req("POST", "/login", _u.urlencode({"password": "pw12345678"}))
+        cookie = r.getheader("Set-Cookie").split(";")[0]
+
+        _r, listing = req("GET", "/agent", cookie=cookie)
+        assert "Review &amp; approve" in listing and "asks: service_account_sys_id" in listing
+
+        fp = f"{INPUT_RULE}:sysauto_script (test)"
+        _r, ask = req("POST", "/agent/approve",
+                      _u.urlencode({"run_id": run_id, "fingerprint": fp}), cookie=cookie)
+        assert "This fix has a question" in ask and "which service account" in ask
+        assert "Approval recorded" not in ask  # no token exists yet
+
+        _r, done = req("POST", "/agent/approve",
+                       _u.urlencode({"run_id": run_id, "fingerprint": fp,
+                                     "input_service_account_sys_id": "svc42"}), cookie=cookie)
+        assert "Approval recorded" in done
+        assert "Dry run - nothing was changed" in done  # dry run on: preview, with values bound
+        assert "would change" in done
+    finally:
+        httpd.shutdown()
+
+
 def test_compiled_pack_applies_through_the_wc_executor():
     """The whole chain: spec block -> compiled pack -> W-C apply -> verified
     change on the (fake) instance. This is the claim the feature makes."""

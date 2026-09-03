@@ -332,8 +332,19 @@ class Orchestrator:
 
     # -- tool 4: apply --------------------------------------------------------
 
+    def remediation_inputs(self, rule_id: str) -> list[dict]:
+        """Approver inputs a rule's declared fix requires (D-028), with their
+        prompts. Empty for rules without a remediation block or without inputs.
+        Read-only: used by the console to ask BEFORE minting an approval."""
+        from .rules import RULE_REGISTRY
+
+        rule = RULE_REGISTRY.get(rule_id)
+        spec = getattr(rule, "spec", None) or {}
+        block = spec.get("remediation_pack") or {}
+        return [{"name": n, "prompt": p} for n, p in sorted((block.get("inputs") or {}).items())]
+
     def apply(self, run_id: int, fingerprint: str, approval_token: str, target_env: str,
-              actor: str = "agent", conversation: str = "") -> ToolResult:
+              inputs: dict | None = None, actor: str = "agent", conversation: str = "") -> ToolResult:
         """Gated. Verifies approval, environment and autonomy ceiling before anything else.
 
         The W-B scoped app executor (D-005) is Phase 2 and is not built, so a
@@ -342,7 +353,11 @@ class Orchestrator:
         refused for being unauthorised, not for the executor being absent.
         """
         args = {"run_id": run_id, "fingerprint": fingerprint, "target_env": target_env,
-                "approval_token": "<redacted>" if approval_token else None}
+                "approval_token": "<redacted>" if approval_token else None,
+                # Input values are configuration (a sys_id, a property value),
+                # not secrets, and they change what reaches the instance - so
+                # they belong in the audit record in full.
+                "inputs": dict(inputs) if inputs else None}
         try:
             if target_env not in ("sub-production",):
                 raise AgentError(
@@ -381,6 +396,26 @@ class Orchestrator:
                 raise AgentError(str(exc)) from exc
 
             pack = self._load_fixpack(int(run_id), fingerprint, f)
+
+            # D-028: a declared input is a question only the approver answers.
+            # Bind values before the executor sees the plan; refuse with the
+            # prompts if any are missing, so the caller can ask a human rather
+            # than guess. This happens before dry run too: a preview of a plan
+            # whose values are unknown would preview a fiction.
+            from .fixpacks.declarative import bind_inputs, unresolved_inputs
+
+            missing = unresolved_inputs(pack.operations)
+            if missing:
+                supplied = {k: str(v).strip() for k, v in (inputs or {}).items() if str(v).strip()}
+                unmet = [n for n in missing if n not in supplied]
+                if unmet:
+                    prompts = {i["name"]: i["prompt"] for i in self.remediation_inputs(f.get("rule_id", ""))}
+                    raise AgentError(
+                        "This fix needs approver-supplied values before it can run or be previewed: "
+                        + "; ".join(f"{n} ({prompts.get(n, 'value required')})" for n in unmet)
+                        + ". Supply them via the console form or the 'inputs' argument. Nothing was written."
+                    )
+                pack = bind_inputs(pack, supplied)
 
             try:
                 executor = build_executor(self.config, instance_id)
@@ -453,9 +488,21 @@ class Orchestrator:
         from .cli import load_snapshot  # local import keeps agent.py import-light
         from .fixpacks import FIXPACK_GENERATORS
 
-        gen = FIXPACK_GENERATORS.get(finding.get("rule_id"))
+        rule_id = finding.get("rule_id")
+        gen = FIXPACK_GENERATORS.get(rule_id)
         if gen is None:
-            raise AgentError(f"No fix-pack generator for {finding.get('rule_id')}.")
+            # D-028: a declarative rule with a remediation block carries its
+            # own fix - regenerate it from the spec, same as the engine does.
+            from .rules import RULE_REGISTRY
+
+            spec = getattr(RULE_REGISTRY.get(rule_id), "spec", None)
+            if spec and spec.get("remediation_pack"):
+                from .fixpacks.declarative import generate_declarative
+
+                def gen(f, s, _spec=spec):
+                    return generate_declarative(_spec, f, s)
+            else:
+                raise AgentError(f"No fix-pack generator for {rule_id}.")
         snap_path = self.runs_dir / f"run_{run_id}" / "snapshot.json"
         if not snap_path.exists():
             raise AgentError(
@@ -557,7 +604,9 @@ def tool_schemas() -> list[dict]:
          "parameters": {"run_id": "integer", "fingerprint": "string issued by findings()"}},
         {"name": "apply", "description": "Apply an approved fix-pack. Requires a human-minted approval token.",
          "parameters": {"run_id": "integer", "fingerprint": "string", "approval_token": "string",
-                        "target_env": "'sub-production'"}},
+                        "target_env": "'sub-production'",
+                        "inputs": "object of name -> value for fixes that declare approver inputs (optional; "
+                                  "the refusal lists what is needed)"}},
         {"name": "baseline_diff", "description": "Drift against a customer-signed baseline (A3 standing approval).",
          "parameters": {"instance_id": "string", "baseline_id": "string"}},
     ]
