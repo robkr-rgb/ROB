@@ -101,10 +101,22 @@ def run_scan(
 
     seen_names: set[str] = set()
     for f in result.findings:
-        gen = FIXPACK_GENERATORS.get(f.rule_id)
-        if gen is None or f.tier.startswith("T3") or f.accepted:
+        if f.tier.startswith("T3") or f.accepted:
             continue
-        pack = gen(f, snapshot)
+        gen = FIXPACK_GENERATORS.get(f.rule_id)
+        if gen is not None:
+            pack = gen(f, snapshot)
+        else:
+            # D-028: a declarative rule with a remediation_pack block carries
+            # its own fix. The block was validated and proven at load time, so
+            # a new rule needs no Python here before its finding is actionable.
+            rule = RULE_REGISTRY.get(f.rule_id)
+            spec = getattr(rule, "spec", None)
+            if not (spec and spec.get("remediation_pack")):
+                continue
+            from .fixpacks.declarative import generate_declarative
+
+            pack = generate_declarative(spec, f, snapshot)
         if pack is not None and pack.is_complete():
             if pack.name in seen_names:  # uniqueness guard for per-area packs
                 pack.name = f"{pack.name}-{len(seen_names)}"

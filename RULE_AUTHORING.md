@@ -71,6 +71,65 @@ reviewer might wave through.
 - Every table a rule reads must be populated by the extractor, so a rule cannot
   ship and then silently never fire
 
+### Declared remediation: the fix ships inside the rule (D-028)
+
+A pack rule may carry a `remediation_pack` block. The engine compiles it into
+a full five-element fix-pack with typed executor operations at scan time, so
+**a new rule with a block is executable on day one, with no Python written**.
+A rule without a block still gets its finding and its written remediation
+text; the block is what upgrades advice into a gated, reversible action.
+
+| Kind | Fix shape | Pairs with detection |
+|---|---|---|
+| `update_fields` | Set declared field values on every matched record | `presence` |
+| `transform_field` | Compute the new value from the current one via a named transform (e.g. `http_to_https`) | `presence` |
+| `set_expected_properties` | The detection's own `expect` map IS the fix | `value_match` |
+
+Worked example - the shipped ROB-INT-001 block:
+
+```json
+"remediation_pack": {
+  "kind": "transform_field",
+  "field": "rest_endpoint",
+  "transform": "http_to_https",
+  "scope_statement": "Rewrites the rest_endpoint scheme from http to https ...",
+  "instructions_extra": "Re-test each integration end to end ..."
+}
+```
+
+A value the snapshot cannot supply is a **declared question, never a guess**:
+
+```json
+"set": {"run_as": {"$input": "service_account_sys_id"}},
+"inputs": {"service_account_sys_id": "sys_id of the service account that ..."}
+```
+
+The executor refuses to run a plan with unbound inputs; the approver supplies
+values at approval time (`bind_inputs`). A rule with inputs can never be A3,
+because standing approval cannot answer a question.
+
+What the loader enforces on a block (in addition to everything below):
+
+- `kind` known, `scope_statement` present (the fix-pack contract's "what this
+  does NOT touch" is mandatory, not boilerplate)
+- The target table is not on the executor's forbidden list - a block that
+  touches ACLs, roles, users or credentials fails the **load**, not the apply
+- Every `$input` is declared with a prompt; `A3` + inputs is refused
+- **Proof at load time**: the block must produce at least one complete,
+  executable operation on the rule's own triggering fixture. A fix that
+  compiles to nothing on the case the rule was proven against is a promise
+  the product cannot keep, and it fails the build instead of a customer
+- `remediation_pack` is logic: changing it without a `VERSION` bump fails the
+  load, because a changed fix under an unchanged version would detach a
+  standing approval from what the rule now does
+
+Operations cover the **full offender set** re-selected from the snapshot, not
+the capped evidence sample, and records already at the target value are
+skipped (idempotence). Fixes that need per-record judgement (logic rewrites,
+CMDB merges, recipient decisions) do not belong in a block - write the
+remediation text for a human, or a hand-written generator if it is partially
+mechanical.
+
 ### Confidence: the staged activation ladder
 
 | Confidence | Behaviour |

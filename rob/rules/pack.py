@@ -23,7 +23,7 @@ import hashlib
 import json
 import pathlib
 
-from ..models import AUTONOMY_CLASSES, CONFIDENCES, EFFORTS, TIERS
+from ..models import AUTONOMY_CLASSES, CONFIDENCES, EFFORTS, EXECUTOR_FORBIDDEN_TABLES, TIERS
 from ..scoring import MODIFIER_DIRECTIONS, SEVERITY_MATRIX
 from .declarative import CONDITION_OPS, DETECTORS, DeclarativeRule
 
@@ -41,7 +41,10 @@ REQUIRED = (
 # Logic-bearing keys: a change to any of these must be accompanied by a
 # VERSION bump, because findings are stamped with the rule version and stale
 # logic under an unchanged version is exactly the failure the pilot hit.
-LOGIC_KEYS = ("detect", "severity", "tier", "autonomy")
+# remediation_pack is logic (D-028): a changed fix under an unchanged version
+# would detach a standing approval from what the rule now does, which is the
+# exact failure the autonomy model's rule-version binding exists to prevent.
+LOGIC_KEYS = ("detect", "severity", "tier", "autonomy", "remediation_pack")
 
 
 class PackError(ValueError):
@@ -155,6 +158,86 @@ def validate(spec: dict, seen: dict[str, str] | None = None) -> None:
     for c in cases:
         if "tables" not in c or "name" not in c:
             _fail(rid, "each fixture case needs 'name' and 'tables'")
+
+    if spec.get("remediation_pack"):
+        _validate_remediation(spec)
+        _prove_remediation(spec)
+
+
+def _validate_remediation(spec: dict) -> None:
+    """Governance for a declared fix (D-028). Same posture as detection: the
+    gate refuses at authoring time what the executor would refuse at apply
+    time, plus what only the spec can know (autonomy, inputs, fixtures)."""
+    from ..fixpacks.declarative import REMEDIATION_KINDS, TRANSFORMS, is_input
+
+    rid = spec["id"]
+    block = spec["remediation_pack"]
+    det = spec["detect"]
+    kind = block.get("kind")
+    if kind not in REMEDIATION_KINDS:
+        _fail(rid, f"remediation_pack.kind must be one of {list(REMEDIATION_KINDS)}")
+    if not str(block.get("scope_statement", "")).strip():
+        _fail(rid, "remediation_pack needs a scope_statement (fix-pack contract: what this fix does NOT touch)")
+    table = det.get("table")
+    if table in EXECUTOR_FORBIDDEN_TABLES:
+        _fail(rid, f"remediation_pack targets '{table}', which no executor operation may ever write "
+                   "(access control and identity are W-B or human territory)")
+
+    inputs = block.get("inputs", {})
+    if inputs and spec["autonomy"] == "A3":
+        _fail(rid, "an A3 rule cannot declare remediation inputs: standing approval cannot answer a question")
+
+    if kind == "set_expected_properties":
+        if det.get("type") != "value_match" or not det.get("expect"):
+            _fail(rid, "set_expected_properties requires a value_match detection with an 'expect' map: "
+                       "the detection's expected values ARE the fix")
+    elif kind == "update_fields":
+        if det.get("type") != "presence":
+            _fail(rid, "update_fields requires a presence detection: the fix applies to the matched records")
+        declared = block.get("set")
+        if not isinstance(declared, dict) or not declared:
+            _fail(rid, "update_fields needs a non-empty 'set' map of field -> value")
+        for f, v in declared.items():
+            if is_input(v):
+                if v["$input"] not in inputs:
+                    _fail(rid, f"remediation input '{v['$input']}' is used but not declared in "
+                               "remediation_pack.inputs (name -> prompt shown to the approver)")
+            elif not isinstance(v, (str, int, float, bool)):
+                _fail(rid, f"update_fields value for '{f}' must be a scalar or an {{'$input': name}} placeholder")
+    elif kind == "transform_field":
+        if det.get("type") != "presence":
+            _fail(rid, "transform_field requires a presence detection")
+        if not str(block.get("field", "")).strip():
+            _fail(rid, "transform_field needs the 'field' to transform")
+        if block.get("transform") not in TRANSFORMS:
+            _fail(rid, f"unknown transform '{block.get('transform')}'. Known: {sorted(TRANSFORMS)}")
+
+
+def _prove_remediation(spec: dict) -> None:
+    """A declared fix must demonstrably produce operations on the rule's own
+    triggering fixture. A remediation block that compiles to nothing on the
+    very case the rule was proven against is a promise the product cannot
+    keep, and it fails the load rather than failing a customer."""
+    from ..fixpacks.declarative import generate_declarative
+    from ..models import Snapshot
+    from .declarative import DeclarativeRule
+
+    rid = spec["id"]
+    rule = DeclarativeRule(spec)
+    proven = False
+    for case in spec["fixture_cases"]:
+        if not case.get("triggers"):
+            continue
+        snap = Snapshot(instance_id="fixture", taken_at="1970-01-01T00:00:00Z",
+                        tables=case["tables"], aggregates=case.get("aggregates", {}))
+        findings = rule.detect(snap, {})
+        for f in findings:
+            pack = generate_declarative(spec, f, snap)
+            if pack is not None and pack.operations and pack.is_complete():
+                proven = True
+    if not proven:
+        _fail(rid, "remediation_pack produced no executable operations on any triggering fixture case. "
+                   "Add a fixture the fix demonstrably acts on, or remove the block.")
 
 
 def read_lock() -> dict:

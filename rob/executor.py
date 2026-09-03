@@ -32,18 +32,12 @@ import datetime as dt
 import json
 import re
 
+from .models import EXECUTOR_FORBIDDEN_TABLES as FORBIDDEN_TABLES
 from .nowaikit import NowAIKitError, NowAIKitClient
 
 # Operation kinds this executor understands. Anything else is refused, so a
 # future fix-pack generator cannot widen the executor's reach by accident.
 OPERATION_KINDS = ("set_property", "update_record", "delete_record")
-
-# Never written by W-C, regardless of approval. See design decision 2.
-FORBIDDEN_TABLES = frozenset({
-    "sys_security_acl", "sys_security_acl_role", "sys_user", "sys_user_role",
-    "sys_user_has_role", "sys_user_grmember", "sys_group_has_role",
-    "sys_user_group", "sys_authentication_profile", "oauth_credential",
-})
 
 WRITE_TOOLS = {
     "set_property": "set_system_property",
@@ -122,6 +116,16 @@ class NowAIKitExecutor:
                 )
             if not op.get("key"):
                 raise ExecutionRefused("Every operation needs a 'key' identifying the record it touches.")
+            unbound = sorted(
+                v["$input"] for v in (op.get("after") or {}).values()
+                if isinstance(v, dict) and "$input" in v
+            )
+            if unbound:
+                raise ExecutionRefused(
+                    f"Operation on {op.get('table')}/{op.get('key')} has unbound inputs {unbound}. "
+                    "A declared input is a question only the approver can answer: bind values with "
+                    "rob.fixpacks.declarative.bind_inputs before execution. Nothing was written."
+                )
         return {"operations": len(pack.operations),
                 "update_set": f"ROB {_slug(pack.name)}",
                 "kinds": sorted({op["kind"] for op in pack.operations})}

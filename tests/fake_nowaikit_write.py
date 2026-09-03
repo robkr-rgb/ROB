@@ -18,6 +18,8 @@ PROPERTIES = {
     "glide.stale.property": "old",
 }
 RECORDS = {"cmdb_rel_ci": {"rel1": {"sys_id": "rel1", "parent": "p1", "child": "gone"}}}
+# Tests may seed extra tables: FAKE_SEED='{"table": {"sys_id": {record}}}'
+RECORDS.update(json.loads(os.environ.get("FAKE_SEED", "{}")))
 UPDATE_SETS = {}
 FAIL_ON = os.environ.get("FAKE_FAIL_ON", "")
 

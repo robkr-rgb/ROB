@@ -19,6 +19,16 @@ CONFIDENCES = ["unvalidated", "provisional", "validated"]
 # Autonomy classes (recommendations/autonomy-model.md, D-013). A4 does not exist.
 AUTONOMY_CLASSES = ["A0", "A1", "A2", "A3"]
 
+# Tables no executor operation may ever target, regardless of approval
+# (W-C design decision 2). Defined here, not in the executor, so the rule-pack
+# governance gate can refuse a remediation block at authoring time instead of
+# the executor refusing it at apply time. Same list, one definition.
+EXECUTOR_FORBIDDEN_TABLES = frozenset({
+    "sys_security_acl", "sys_security_acl_role", "sys_user", "sys_user_role",
+    "sys_user_has_role", "sys_user_grmember", "sys_group_has_role",
+    "sys_user_group", "sys_authentication_profile", "oauth_credential",
+})
+
 
 @dataclass
 class Snapshot:
